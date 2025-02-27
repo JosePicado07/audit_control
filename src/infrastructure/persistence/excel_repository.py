@@ -1,0 +1,601 @@
+import re
+import traceback
+import pandas as pd
+from typing import Dict, List, Optional, Any, Union
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import logging
+from application.use_cases.inventory.inventory_columns import InventoryColumns
+from utils.constant import EXCEL_EXTENSIONS
+import os
+import json
+from functools import lru_cache
+import openpyxl
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
+import warnings
+
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+logger = logging.getLogger(__name__)
+
+class ExcelRepository:
+    """Repository for handling Excel file operations."""
+    
+    def __init__(
+        self, 
+        base_path: Optional[Union[str, Path]] = None,
+        config_path: Optional[Union[str, Path]] = None
+    ):
+        """Initialize repository with paths."""
+        self.base_path = Path(base_path) if base_path else Path.cwd()
+        self.config_path = Path(config_path) if config_path else self.base_path
+        self.executor = ThreadPoolExecutor(max_workers=4)
+        
+        self.inventory_required_columns = InventoryColumns.get_required_columns()
+
+        
+        # Required columns for audit files (case-insensitive)
+        self.audit_required_columns = {
+            'FULL PART NUMBER': str,
+            'PART#': str,
+            'COST TYPE': str,
+            'MANUFACTURER': str,
+            'MFG NUMBER': str,
+            'CONTRACT': str,
+            'ORGANIZATION CODE': str,
+            'ITEM ORG DESTINATION': str,
+            'SERIAL NUMBER CONTROL': str,
+            'MFG PART NUM': str,
+            'VERTEX PRODUCT CLASS': str,
+            'DESCRIPTION': str,
+            'CATALOG PRODUCT PART': str,
+            'CUSTOMER ID': str,
+            'CATEGORY NAME': str,
+            'CROSS REFERENCE': str,
+            'CROSS REFERENCE DESCRIPTION': str,
+            'CROSS REFERENCE TYPE': str,
+            'CATEGORY SET NAME': str,
+            'CREATED BY': str,
+            'CREATION DATE': str,
+            'LAST UPDATE DATE': str,
+            'LAST UPDATED BY': str,
+            'UNSPSC CODE': str,
+            'UNSPSC DESCRIPTION': str,
+            'ITEM STATUS': str,
+        }
+        
+        # Required columns for inventory files (case-insensitive)
+        # Required columns for inventory files (case-insensitive)
+        self.inventory_required_columns = {
+            # Columnas clave para identificación
+            'ITEM NUMBER': str,                    # Campo principal para coincidencia de partes
+            'ORGANIZATION CODE': str,              # Código de organización
+            'ORG WAREHOUSE CODE': str,             # Código de almacén
+            'SUBINVENTORY CODE': str,              # Código de subinventario
+            
+            # Columnas de aging - fundamentales para el análisis de inventario
+            'AGING 0-30 QUANTITY': float,          # Inventario de 0-30 días
+            'AGING 31-60 QUANTITY': float,         # Inventario de 31-60 días
+            'AGING 61-90 QUANTITY': float,         # Inventario de 61-90 días
+            'AGING 91-120 QUANTITY': float,        # Inventario de 91-120 días
+            'AGING 121-150 QUANTITY': float,       # Inventario de 121-150 días
+            'AGING 151-180 QUANTITY': float,       # Inventario de 151-180 días
+            'AGING 181-365 QUANTITY': float,       # Inventario de 181-365 días
+            'AGING OVER 365 QUANTITY': float,      # Inventario mayor a 365 días
+            
+            # Columnas de valor
+            'TOTAL VALUE': float,                  # Valor total del inventario
+            'QUANTITY': float,                     # Cantidad total
+            
+            # Información adicional
+            'SERIAL NUMBER': str,                  # Número de serie si aplica
+            'ITEM DESCRIPTION': str,               # Descripción del ítem
+            'MATERIAL DESIGNATOR': str             # Designador de material (aunque no se use para matching)
+        }
+        
+        self.program_requirements_file = self._resolve_requirements_path()
+        
+        if not os.environ.get('SKIP_VALIDATION'):
+            self._validate_environment()
+
+    def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize DataFrame column names."""
+        df.columns = df.columns.str.strip() \
+                            .str.replace('\n', '') \
+                            .str.replace('\r', '') \
+                            .str.replace('\t', '') \
+                            .str.replace('  ', ' ') \
+                            .str.upper()
+        return df
+    
+    def _validate_environment(self) -> None:
+        """Validate the environment setup."""
+        try:
+            if not self.program_requirements_file.exists():
+                message = (
+                    f"Program requirements file not found at: {self.program_requirements_file}\n"
+                    f"Please ensure the file exists in the config directory or set "
+                    f"PROGRAM_REQUIREMENTS_PATH environment variable.\n"
+                    f"Expected config path: {self.config_path}"
+                )
+                logger.error(message)
+                raise FileNotFoundError(message)
+                
+            logger.debug("Environment validation successful")
+            
+        except Exception as e:
+            logger.error(f"Environment validation failed: {str(e)}")
+            raise
+
+    def _is_inventory_file(self, file_path: Path) -> bool:
+        """Check if file is an inventory format."""
+        try:
+            wb = openpyxl.load_workbook(file_path, read_only=True)
+            ws = wb.active
+            # Verificar primeras 5 filas por si el título está en otra posición
+            for row in list(ws.iter_rows(max_row=5)):
+                for cell in row:
+                    if cell.value and 'WMS' in str(cell.value).upper():
+                        wb.close()
+                        return True
+            wb.close()
+            return False
+        except Exception as e:
+            logger.error(f"Error checking if file is inventory: {str(e)}")
+            return False
+
+    def read_excel_file(
+        self, 
+        file_path: Path,
+        is_inventory: bool = False,
+        sheet_name: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Read Excel file with consistent handling.
+        """
+        try:
+            logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
+            
+            # Configure read options - siempre saltamos la primera fila que es el título
+            options = {
+                'engine': 'openpyxl',
+                'skiprows': 1  # Siempre saltamos la primera fila (título)
+            }
+                
+            # First check if file has multiple sheets
+            xl = pd.ExcelFile(file_path)
+            sheets = xl.sheet_names
+            
+            # If sheet_name not provided, use first sheet
+            if not sheet_name and len(sheets) > 0:
+                sheet_name = sheets[0]
+                
+            options['sheet_name'] = sheet_name
+            
+            # Read the file
+            df = pd.read_excel(file_path, **options)
+            
+            # If multiple sheets were returned, use the first one
+            if isinstance(df, dict):
+                sheet_name = list(df.keys())[0]
+                df = df[sheet_name]
+            
+            # Normalize columns
+            df = self._normalize_columns(df)
+            
+            # Eliminar columnas sin nombre
+            df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
+                  
+            return df
+                
+        except Exception as e:
+            logger.error(f"Error reading Excel file {file_path}: {str(e)}")
+            raise
+
+    def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:
+        """Validate basic file requirements."""
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+            
+        if path.suffix.lower() not in EXCEL_EXTENSIONS:
+            raise ValueError(f"Invalid file format. Must be one of: {EXCEL_EXTENSIONS}")
+            
+        return path
+    
+    def validate_input_file(self, file_path: Union[str, Path]) -> bool:
+        """
+        Validate audit file format and content.
+        
+        Args:
+            file_path: Path to the audit file to validate
+        """
+        try:
+            path = self._validate_file_basics(file_path)
+            
+            # Read and normalize
+            df = self.read_excel_file(path)
+            
+            # Verify required columns
+            missing_columns = set(self.audit_required_columns.keys()) - set(df.columns)
+            
+            if missing_columns:
+                raise ValueError(f"Audit file missing required columns: {missing_columns}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"File validation error: {str(e)}")
+            raise
+
+    def validate_inventory_file(self, file_path: Union[str, Path]) -> bool:
+        """
+        Validate inventory file format and content.
+        """
+        try:
+            path = self._validate_file_basics(file_path)
+            
+            # Leer archivo de inventario con el método específico
+            df = self.read_inventory_file(path)
+            
+            # Verificar columnas requeridas - Convertir todas las columnas a string primero
+            df_columns = set(str(col).upper() for col in df.columns)
+            required_columns = set(col.upper() for col in self.inventory_required_columns.keys())
+            
+            missing_columns = required_columns - df_columns
+            if missing_columns:
+                raise ValueError(f"Inventory file missing required columns: {missing_columns}")
+            
+            return True
+                
+        except Exception as e:
+            logger.error(f"Inventory file validation error: {str(e)}")
+            raise
+        
+    def save_excel_file(self, df: pd.DataFrame, file_path: Path) -> None:
+        """
+        Save DataFrame to Excel with consistent formatting.
+        
+        Args:
+            df: DataFrame to save
+            file_path: Path where to save the file
+        """
+        try:
+            # Configure default styles for new workbook
+            options = {
+                'engine': 'openpyxl',
+                'index': False,
+                # Remover encoding ya que no es soportado por pandas to_excel
+            }
+            
+            # Save with configured options
+            df.to_excel(file_path, **options)
+            
+            # Apply styles
+            wb = openpyxl.load_workbook(file_path)
+            ws = wb.active
+            
+            font = Font(name='Calibri', size=11)
+            alignment = Alignment(horizontal='general', vertical='bottom')
+            
+            for row in ws.iter_rows():
+                for cell in row:
+                    cell.font = font
+                    cell.alignment = alignment
+            
+            wb.save(file_path)
+            
+        except Exception as e:
+            logger.error(f"Error saving Excel file {file_path}: {str(e)}")
+            raise
+
+    def get_program_requirements(self, contract: str) -> Dict[str, Any]:
+        try:            
+            if not self.program_requirements_file.exists():
+                raise FileNotFoundError(f"Program requirements file not found: {self.program_requirements_file}")
+            
+            # Read Excel file with validation
+            df = pd.read_excel(self.program_requirements_file, engine='openpyxl')
+            df = self._normalize_columns(df)
+            
+            # Required columns validation
+            required_columns = {
+                'CONTRACT': 'Contract ID',
+                'ORG FOR SERIAL CONTROL COMPARISION': 'Base Organization',
+                'ORGANIZATION CODE (PHYSICAL ORGS)': 'Physical Organizations',
+                'ORGANIZATION CODE (DROPSHIP ORGS)': 'Dropship Organizations',
+                'ITEM ORG DESTINATION THAT CAN BE USED + OTHER ORGS': 'Item Org Destination',
+                'DOES PROGRAM TRANSACT INTERNATIONALLY?': 'International Flag',
+                'STATUS': 'Status'
+            }
+            
+            missing_columns = set(required_columns.keys()) - set(df.columns)
+            if missing_columns:
+                raise ValueError(f"Missing required columns in requirements file: {', '.join(missing_columns)}")
+            
+            # Contract validation and data retrieval
+            contract = str(contract).strip().upper()
+            contract_mask = df['CONTRACT'].str.upper() == contract
+            program_data = df[contract_mask]
+            
+            if program_data.empty:
+                raise ValueError(f"No requirements found for contract: {contract}")
+                
+            # Extract base org with validation    
+            base_org = program_data['ORG FOR SERIAL CONTROL COMPARISION'].iloc[0]
+            if pd.isna(base_org):
+                raise ValueError(f"Base organization not specified for contract {contract}")
+            
+            base_org = str(base_org).strip()
+            if base_org.endswith('.0'):
+                base_org = base_org[:-2]
+            # Usar .zfill directamente en str, no en Series
+            base_org = base_org.zfill(2)
+            
+            # Process organizations from Item Org Destination - PRINCIPAL SOURCE
+            destination_orgs_raw = program_data['ITEM ORG DESTINATION THAT CAN BE USED + OTHER ORGS'].iloc[0]
+            physical_orgs_raw = program_data['ORGANIZATION CODE (PHYSICAL ORGS)'].iloc[0]
+            dropship_orgs_raw = program_data['ORGANIZATION CODE (DROPSHIP ORGS)'].iloc[0]
+            
+            destination_orgs = self._process_org_codes(destination_orgs_raw)
+            physical_orgs = self._process_org_codes(physical_orgs_raw)
+            dropship_orgs = self._process_org_codes(dropship_orgs_raw)
+            
+            all_orgs = destination_orgs + physical_orgs + dropship_orgs
+            unique_orgs = sorted(list(set(all_orgs)))
+            
+            # Add these debug statements to verify
+            logger.debug(f"Raw destination orgs: {destination_orgs_raw}")
+            logger.debug(f"Processed destination orgs: {destination_orgs}")
+            logger.debug(f"Raw physical orgs: {physical_orgs_raw}")
+            logger.debug(f"Processed physical orgs: {physical_orgs}")
+            logger.debug(f"Raw dropship orgs: {dropship_orgs_raw}")
+            logger.debug(f"Processed dropship orgs: {dropship_orgs}")
+            logger.debug(f"Combined unique orgs: {unique_orgs}")
+            
+            if not destination_orgs:
+                raise ValueError(f"Item Org Destination organizations are required for contract {contract}")
+            
+            # Build requirements dict manteniendo los datos originales pero usando destination_orgs
+            requirements = {
+                'contract': contract,
+                'base_org': base_org,
+                'org_destination': unique_orgs,  
+                'physical_orgs':physical_orgs,
+                'dropship_orgs': dropship_orgs,
+                'international': bool(program_data['DOES PROGRAM TRANSACT INTERNATIONALLY?'].iloc[0]),
+                'status': program_data['STATUS'].iloc[0]
+            }
+            if not requirements['org_destination']:
+                raise ValueError(f"No valid organizations found for contract {contract}")
+            
+            logger.debug(f"Program requirements loaded for contract {contract}:")
+            logger.debug(f"Base org: {requirements['base_org']}")
+            logger.debug(f"Org destination: {requirements['org_destination']}")
+            logger.debug(f"Physical orgs: {requirements['physical_orgs']}")
+            logger.debug(f"Dropship orgs: {requirements['dropship_orgs']}")
+            
+            return requirements
+                
+        except Exception as e:
+            logger.error(f"Error retrieving program requirements for contract {contract}: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            raise
+        
+    def _process_org_codes(self, org_codes: str) -> List[str]:
+        """
+        Process organization codes with enhanced validation and error handling.
+        
+        Args:
+            org_codes: String containing organization codes
+            
+        Returns:
+            List[str]: List of validated organization codes
+        """
+        try:
+            if pd.isna(org_codes):
+                return []
+                
+            # Convert to string and clean float values
+            org_str = str(org_codes).strip()
+            if org_str.endswith('.0'):
+                org_str = org_str[:-2]
+                
+            if not org_str:
+                return []
+            
+            normalized_orgs = set()
+            
+            # Separar por "and add" o "and" si existe
+            parts = re.split(r'\s+(?:and add|and)\s+', org_str, flags=re.IGNORECASE)
+            
+            for part in parts:
+                # Handle WWT_ORGS pattern
+                if 'WWT' in part.upper():
+                    # Extract all numbers from WWT pattern
+                    numbers = re.findall(r'\d+', part)
+                    for num in numbers:
+                        if num.isdigit():
+                            # Preserve 3-digit codes as is
+                            if len(num) == 3:
+                                normalized_orgs.add(num)
+                            else:
+                                # Usar .zfill directamente en str, no en Series
+                                normalized_orgs.add(num.zfill(2))
+                else:
+                    # Handle comma-separated values
+                    numbers = re.findall(r'\d+', part)
+                    for num in numbers:
+                        if num.isdigit():
+                            # Preserve 3-digit codes as is
+                            if len(num) == 3:
+                                normalized_orgs.add(num)
+                            else:
+                                # Usar .zfill directamente en str, no en Series
+                                normalized_orgs.add(num.zfill(2))
+            
+            # Validar y retornar resultados ordenados
+            valid_orgs = []
+            for org in normalized_orgs:
+                # Validar que sean números y tengan longitud correcta
+                if org.isdigit() and (2 <= len(org) <= 3):
+                    valid_orgs.append(org)
+                    
+            logger.debug(f"Processed org codes: Input='{org_codes}' Output={valid_orgs}")
+            return sorted(valid_orgs)
+            
+        except Exception as e:
+            logger.error(f"Error processing org codes: {str(e)}")
+            logger.error(f"Input value: {org_codes}")
+            return []
+            
+    @staticmethod
+    def extract_organizations(org_str: str) -> List[str]:
+        """
+        Extraer organizaciones de manera extremadamente robusta.
+        Maneja múltiples formatos y variaciones.
+        
+        Args:
+            org_str: String conteniendo códigos de organización
+            
+        Returns:
+            List[str]: Lista ordenada de códigos de organización únicos
+        """
+        if pd.isna(org_str):
+            return []
+        
+        # Convertir a string y normalizar
+        org_str = str(org_str).lower()
+        
+        # Patrones de extracción extendidos
+        extraction_patterns = [
+            r'wwt_orgs_(\d+(?:_\d+)*)',
+            r'wwt_sing_orgs_(\d+(?:_\d+)*)',
+            r'wwt_uk_orgs_(\d+(?:_\d+)*)',
+            r'wwt_ind_orgs_(\d+(?:_\d+)*)',
+            r'wwt_br_orgs_(\d+(?:_\d+)*)',
+            r'wwt_vn_orgs_(\d+(?:_\d+)*)',
+            r'telco_(\d+(?:_\d+)*)',
+            r'orgs(?:_|\s*)(\d+(?:[,_\s]\d+)*)',
+            # Patrones adicionales para casos comunes
+            r'org[s]?\s*[:=-]?\s*(\d+(?:[,_\s]\d+)*)',
+            r'location[s]?\s*[:=-]?\s*(\d+(?:[,_\s]\d+)*)'
+        ]
+        
+        additional_patterns = [
+            r'and\s*add\s*(\d+(?:[,_\s]\d+)*)',
+            r'\+\s*(\d+(?:[,_\s]\d+)*)',
+            r'with\s*(\d+(?:[,_\s]\d+)*)',
+            r'includes?\s*(\d+(?:[,_\s]\d+)*)'
+        ]
+        
+        organizations = set()
+        
+        # Intentar extraer con todos los patrones
+        all_patterns = extraction_patterns + additional_patterns
+        for pattern in all_patterns:
+            matches = re.findall(pattern, org_str)
+            for match in matches:
+                orgs = re.findall(r'\d+', str(match))
+                organizations.update(orgs)
+        
+        # Extracción general si no se encontraron organizaciones
+        if not organizations:
+            direct_orgs = re.findall(r'\b(\d{2,3})\b', org_str)
+            organizations.update(direct_orgs)
+        
+        # Filtrar y validar
+        valid_orgs = sorted(set(
+            org for org in organizations 
+            if len(org) >= 2 and len(org) <= 3
+        ))
+        
+        return valid_orgs
+    
+    def _resolve_requirements_path(self) -> Path:
+        """
+        Find the program requirements file path.
+        
+        Returns:
+            Path: Ruta validada al archivo de requerimientos
+            
+        Raises:
+            FileNotFoundError: Si no se encuentra el archivo en ninguna ubicación
+        """
+        possible_filenames = [
+            "Program Requirements - PDM - NPI for Audit.xlsx",
+            "Program Requirements - PDM - NPI  for Audit.xlsx"
+        ]
+        
+        logger.debug("Searching for requirements file in possible locations...")
+        
+        # Rutas posibles con prioridad
+        search_paths = [
+            self.config_path,
+            self.base_path / "config",
+            self.base_path,
+            Path(__file__).parent.parent.parent / "config"
+        ]
+        
+        # Buscar en todas las combinaciones posibles
+        for filename in possible_filenames:
+            for base_path in search_paths:
+                path = base_path / filename
+                logger.debug(f"Checking path: {path}")
+                if path.exists():
+                    logger.info(f"Found requirements file at: {path}")
+                    return path
+        
+        # Verificar variable de entorno
+        env_path = os.environ.get('PROGRAM_REQUIREMENTS_PATH')
+        if env_path:
+            path = Path(env_path)
+            if path.exists():
+                logger.info(f"Using requirements file from environment: {path}")
+                return path
+            else:
+                logger.warning(f"Environment path does not exist: {env_path}")
+        
+        # Usar ruta por defecto como último recurso
+        default_path = self.config_path / "Program Requirements - PDM - NPI for Audit.xlsx"
+        logger.warning(f"No requirements file found, defaulting to: {default_path}")
+        
+        if not default_path.exists():
+            error_msg = (
+                f"Requirements file not found in any location. "
+                f"Searched in: {[str(p) for p in search_paths]}"
+            )
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
+        
+        return default_path
+
+    def cleanup(self) -> None:
+        """Clean up repository resources."""
+        try:
+            if hasattr(self, 'executor'):
+                logger.debug("Shutting down executor...")
+                self.executor.shutdown(wait=True)
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
+
+    def __del__(self):
+        """Ensure cleanup on destruction."""
+        self.cleanup()
+        
+    def read_inventory_file(self, file_path: Path) -> pd.DataFrame:
+        """Read and normalize inventory file."""
+        try:
+            logger.info(f"Reading inventory file: {file_path}")
+            
+            if not self._is_inventory_file(file_path):
+                raise ValueError("Not a valid inventory file format")
+            
+            # Usar read_excel_file para mantener la consistencia
+            df = self.read_excel_file(file_path, is_inventory=True)
+            
+            return df
+                
+        except Exception as e:
+            logger.error(f"Error reading inventory file: {str(e)}")
+            raise
