@@ -142,104 +142,21 @@ class ReportGenerator:
 
             excel_path = self.output_dir / f"serial_control_validation_{timestamp}.xlsx"
             
-            # MODIFICADO: Siempre leer organizaciones físicas del archivo de configuración
-            logger.info("Obteniendo organizaciones físicas desde ALL_WWT_Dropship_and_Inventory_Organizations.xlsx...")
-            config_file = Path("config") / "ALL_WWT_Dropship_and_Inventory_Organizations.xlsx"
-            physical_orgs = []
+            # CORRECCIÓN: Usar la lista exacta de 72 organizaciones físicas proporcionada
+            # Estas son las organizaciones que cumplen con DROPSHIP_ENABLED='N' y WMS_ENABLED_FLAG='Y'
+            # Esto es la lista definitiva de organizaciones físicas
+            physical_orgs = [
+                '01', '06', '07', '08', '09', '10', '102', '103', '104', '105', 
+                '111', '113', '117', '118', '12', '120', '122', '123', '124', '128', 
+                '13', '131', '132', '133', '134', '135', '136', '14', '140', '141', 
+                '142', '148', '149', '15', '154', '155', '156', '157', '159', '160', 
+                '22', '25', '26', '28', '29', '31', '34', '37', '38', '40', 
+                '42', '43', '45', '46', '47', '51', '52', '53', '56', '57', 
+                '58', '66', '72', '73', '74', '82', '85', '87', '89', '91', 
+                '94', '97'
+            ]
             
-            if config_file.exists():
-                try:
-                    logger.info(f"Leyendo organizaciones físicas de: {config_file}")
-                    df_config = pd.read_excel(config_file)
-                    
-                    # Imprimir las columnas disponibles para diagnóstico
-                    logger.info(f"Columnas en archivo de configuración: {df_config.columns.tolist()}")
-                    
-                    # Normalizar nombres de columnas
-                    df_config.columns = [col.upper().strip() for col in df_config.columns]
-                    
-                    # Buscar columnas específicas
-                    org_col = None
-                    dropship_col = None
-                    wms_col = None  # NUEVO: Variable para la columna WMS
-                    
-                    # Intentar encontrar las columnas relevantes
-                    for col in df_config.columns:
-                        if 'ORGAN' in col and 'CODE' in col:
-                            org_col = col
-                            logger.info(f"Columna de organización encontrada: {org_col}")
-                        elif 'DROP' in col:
-                            dropship_col = col
-                            logger.info(f"Columna de dropship encontrada: {dropship_col}")
-                        elif 'WMS' in col and 'FLAG' in col:  # NUEVO: Buscar columna WMS
-                            wms_col = col
-                            logger.info(f"Columna de WMS encontrada: {wms_col}")
-                    
-                    # MODIFICADO: Verificar que existan las tres columnas necesarias
-                    if org_col and dropship_col and wms_col:
-                        # Filtrar por organizaciones físicas que cumplan ambas condiciones
-                        for _, row in df_config.iterrows():
-                            if pd.isna(row[org_col]):
-                                continue
-                                
-                            org_code = str(row[org_col]).strip()
-                            # Convertir a número si es posible y luego a string con zfill
-                            try:
-                                org_code = str(int(float(org_code)))
-                                # Usar str.zfill en lugar de zfill directamente
-                                org_code = org_code.zfill(2)
-                            except:
-                                # Usar str.zfill en lugar de zfill directamente
-                                org_code = org_code.zfill(2)
-                            
-                            # MODIFICADO: Verificar dos condiciones
-                            # 1. DROPSHIP_ENABLED = 'N'
-                            dropship_val = row.get(dropship_col, '')
-                            is_not_dropship = isinstance(dropship_val, str) and dropship_val.strip().upper() == 'N'
-                            
-                            # 2. WMS_ENABLED_FLAG = 'Y'
-                            wms_val = row.get(wms_col, '')
-                            is_wms_enabled = isinstance(wms_val, str) and wms_val.strip().upper() == 'Y'
-                            
-                            # SOLO agregar si ambas condiciones se cumplen
-                            if is_not_dropship and is_wms_enabled:
-                                physical_orgs.append(org_code)
-                                    
-                        # Eliminar duplicados y ordenar
-                        physical_orgs = sorted(list(set(physical_orgs)))
-                        logger.info(f"Se encontraron {len(physical_orgs)} organizaciones físicas (DROPSHIP='N' y WMS='Y'): {physical_orgs}")
-                    else:
-                        # MEJORADO: Mensaje más específico sobre columnas faltantes
-                        missing_cols = []
-                        if not org_col:
-                            missing_cols.append("ORGANIZATION_CODE")
-                        if not dropship_col:
-                            missing_cols.append("DROPSHIP_ENABLED")
-                        if not wms_col:
-                            missing_cols.append("WMS_ENABLED_FLAG")
-                        
-                        logger.warning(f"No se encontraron columnas necesarias en el archivo de configuración: {', '.join(missing_cols)}")
-                            
-                except Exception as e:
-                    logger.error(f"Error procesando archivo de configuración: {str(e)}")
-                    logger.error(traceback.format_exc())
-            else:
-                logger.error(f"Archivo de configuración no encontrado: {config_file}")
-            
-            # Si no se encontraron organizaciones físicas, usar valores de program_requirements como fallback
-            if not physical_orgs:
-                physical_orgs = program_requirements.get('physical_orgs', [])
-                logger.warning(f"Usando physical_orgs de program_requirements como fallback: {physical_orgs}")
-                
-                # Si aún no hay organizaciones, usar org_destination como último recurso
-                if not physical_orgs:
-                    physical_orgs = program_requirements.get('org_destination', [])
-                    logger.warning(f"Usando org_destination como último recurso: {physical_orgs}")
-            
-            # Normalizar las organizaciones para consistencia
-            physical_orgs = [str(org).strip() for org in physical_orgs]
-            # Convertir a números y aplicar zfill usando .str para Series
-            physical_orgs = pd.Series(physical_orgs).str.zfill(2).tolist()
+            logger.info(f"Usando lista fija de {len(physical_orgs)} organizaciones físicas")
             
             # Filtrar organizaciones de prueba (que comienzan con Z)
             physical_orgs = [org for org in physical_orgs if not org.upper().startswith('Z')]
@@ -258,24 +175,68 @@ class ReportGenerator:
             logger.debug(f"Primeros registros:\n{serial_validation_df.head()}")
             logger.debug(f"Total de registros: {len(serial_validation_df)}")
 
-            # Generar resumen
+            # Generar resumen mejorado con sistema de tolerancia
+            # Identificar partes que tienen discrepancias Y tienen inventario
+            mismatches_with_inventory = serial_validation_df[
+                (serial_validation_df['Serial Control match?'] == 'Mismatch') & 
+                (serial_validation_df['Inventory on Hand? Y/N'] == 'Y')
+            ]
+            
+            # Calcular porcentajes para el sistema de tolerancia
+            total_parts = len(serial_validation_df)
+            total_mismatches = len(serial_validation_df[serial_validation_df['Serial Control match?'] == 'Mismatch'])
+            total_with_inventory = len(serial_validation_df[serial_validation_df['Inventory on Hand? Y/N'] == 'Y'])
+            mismatches_with_inventory_count = len(mismatches_with_inventory)
+            
+            # Calcular porcentajes para evaluación de tolerancia
+            mismatch_pct = (total_mismatches / max(total_parts, 1)) * 100
+            mismatch_with_inventory_pct = (mismatches_with_inventory_count / max(total_with_inventory, 1)) * 100
+            
+            # Determinar si estamos dentro del umbral de tolerancia del 20%
+            within_tolerance = mismatch_pct <= 20.0
+            
+            # Crear lista de partes críticas para incluir en el resumen
+            critical_parts = []
+            if mismatches_with_inventory_count > 0:
+                # Sólo incluir las primeras 10 partes para no sobrecargar el resumen
+                critical_parts = mismatches_with_inventory['Part Number'].tolist()[:10]
+                if len(mismatches_with_inventory) > 10:
+                    critical_parts.append("... (y otras)")
+            
+            # CORRECCIÓN: Extraer las organizaciones que realmente se usaron en el reporte final
+            # Obtenemos las columnas del DataFrame que corresponden a organizaciones físicas
+            physical_orgs_columns = [col.replace('org ', '').replace(' Serial Control', '') 
+                                  for col in serial_validation_df.columns 
+                                  if col.startswith('org ') and 'Serial Control' in col]
+            
+            # Generar resumen mejorado
             summary = {
-                'total_parts_reviewed': len(serial_validation_df),
-                'total_Serial Control mismatches': len(serial_validation_df[
-                    serial_validation_df['Serial Control match?'] == 'Mismatch'
-                ]),
-                'total_with_inventory': len(serial_validation_df[
-                    serial_validation_df['Inventory on Hand? Y/N'] == 'Y'
-                ]),
-                'parts_with_inventory_pct': f"{(len(serial_validation_df[serial_validation_df['Inventory on Hand? Y/N'] == 'Y']) / max(len(serial_validation_df), 1) * 100):.2f}%",
-                'physical_orgs': ', '.join(physical_orgs),
-                'total_physical_orgs': len(physical_orgs),
+                'total_parts_reviewed': total_parts,
+                'total_Serial Control mismatches': total_mismatches,
+                'mismatch_percentage': f"{mismatch_pct:.2f}%",
+                'total_with_inventory': total_with_inventory,
+                'parts_with_inventory_pct': f"{(total_with_inventory / max(total_parts, 1) * 100):.2f}%",
+                'mismatches_with_inventory': mismatches_with_inventory_count,
+                'mismatches_with_inventory_pct': f"{mismatch_with_inventory_pct:.2f}%",
+                'within_tolerance': "Yes" if within_tolerance else "No",
+                'tolerance_threshold': "20%",
+                'physical_orgs': ', '.join(physical_orgs_columns),  # CORRECCIÓN: Usar las organizaciones reales del reporte
+                'total_physical_orgs': len(physical_orgs_columns),  # CORRECCIÓN: Contar las organizaciones reales del reporte
+                'critical_review_parts': ', '.join(critical_parts) if critical_parts else "None",
                 'timestamp': datetime.now().isoformat()
             }
 
             print("\n=== EXTERNAL REPORT SUMMARY ===")
             for key, value in summary.items():
                 print(f"{key}: {value}")
+                
+            # Log detallado de mismatches con inventario para diagnóstico
+            if mismatches_with_inventory_count > 0:
+                logger.info(f"Se encontraron {mismatches_with_inventory_count} partes con discrepancias que tienen inventario")
+                for idx, row in mismatches_with_inventory.head(10).iterrows():
+                    part = row['Part Number']
+                    details = row['Inventory Details']
+                    logger.info(f"Parte crítica para revisión: {part} - {details}")
             
             # DEBUG: Verificar resumen
             logger.debug("Resumen generado:")
@@ -315,16 +276,30 @@ class ReportGenerator:
             org_validation_df = self._generate_org_validation_data(results_df, org_destination)
             print(f"\n[Internal Report] DataFrame después de validación:\n{org_validation_df.head()}")
 
-            # Generate summary information
+            # MEJORA: Generación de resumen con conteo correcto de problemas
+            # Contador de problemas por organización
+            issues_by_org = {}
+            for org in org_destination:
+                # Un problema es cuando una parte debería existir en esta org pero no existe
+                issues_by_org[org] = 0
+                
+            # Contar manualmente para mayor precisión
+            for _, row in org_validation_df.iterrows():
+                # Si tiene mismatch, contar para cada organización faltante
+                if row['Organization Status'] == 'Mismatch' and row['Organization code mismatch'] != 'None':
+                    # Obtener organizaciones faltantes
+                    missing_orgs = [org.strip() for org in str(row['Organization code mismatch']).split(',')]
+                    # Incrementar contador para cada organización faltante
+                    for org in missing_orgs:
+                        if org in issues_by_org:
+                            issues_by_org[org] += 1
+            
+            # Generate summary information con el conteo corregido
             summary = {
                 'total_parts': len(org_validation_df['Part Number'].unique()),
-                'missing_orgs_issues': len(org_validation_df[org_validation_df['Item Status'] == 'Missing in Org']),
+                'missing_orgs_issues': len(org_validation_df[org_validation_df['Organization Status'] == 'Mismatch']),
                 'issues_by_type': org_validation_df['Item Status'].value_counts().to_dict(),
-                'issues_by_org': {
-                    # Actualizado para usar las columnas de Serial Control
-                    org: len(org_validation_df[org_validation_df[f'org {org} Serial Control'] == 'Not found in org'])
-                    for org in org_destination
-                },
+                'issues_by_org': issues_by_org,  # Contador preciso por organización
                 'severity_breakdown': {
                     'critical': len(org_validation_df[org_validation_df['Item Status'] == 'Missing in Org']),
                     'major': len(org_validation_df[org_validation_df['Organization Status'] == 'Mismatch']),
@@ -332,6 +307,12 @@ class ReportGenerator:
                 },
                 'timestamp': datetime.now().isoformat()
             }
+            
+            # Log detallado del resumen
+            logger.info("\n=== RESUMEN DEL REPORTE INTERNO ===")
+            logger.info(f"Total de partes: {summary['total_parts']}")
+            logger.info(f"Problemas de organizaciones faltantes: {summary['missing_orgs_issues']}")
+            logger.info(f"Problemas por organización: {issues_by_org}")
             
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 org_validation_df.to_excel(writer, sheet_name="Audit Results", index=False)
@@ -408,17 +389,21 @@ class ReportGenerator:
                     elif 'Serial Control' in col_name:
                         for row_idx, value in enumerate(df[col_name], 2):
                             cell = worksheet.cell(row=row_idx, column=col_idx)
-                            value = str(value).strip().upper()
+                            orig_value = str(value).strip()
+                            upper_value = orig_value.upper()
 
                             color = self.COLORS['NEUTRAL']
                             font_color = '000000'
 
-                            if 'NO SERIAL NUMBER CONTROL' in value:
+                            # CORRECCIÓN: Detectar "Not found in org" en cualquier combinación de mayúsculas/minúsculas
+                            if 'NO SERIAL NUMBER CONTROL' in upper_value:
                                 color = self.COLORS['LIGHT_YELLOW']
-                            elif 'DYNAMIC ENTRY' in value:
+                            elif 'DYNAMIC ENTRY' in upper_value:
                                 color = self.COLORS['LIGHT_BLUE']
-                            elif 'NOT FOUND' in value:
+                            elif 'NOT FOUND' in upper_value or upper_value == 'NOT FOUND IN ORG' or orig_value == 'Not found in org':
                                 color = self.COLORS['LIGHT_RED']
+                                # CORRECCIÓN: Estandarizar el texto mostrado como "Not found in org"
+                                cell.value = 'Not found in org'
 
                             cell.fill = PatternFill(start_color=color, fill_type='solid')
                             cell.font = Font(color=font_color)
@@ -427,13 +412,17 @@ class ReportGenerator:
                     elif col_name.startswith('org ') and 'Serial Control' not in col_name:
                         for row_idx, value in enumerate(df[col_name], 2):
                             cell = worksheet.cell(row=row_idx, column=col_idx)
-                            value = str(value).strip().upper()
+                            orig_value = str(value).strip()
+                            upper_value = orig_value.upper()
 
-                            if 'PRESENT IN ORG' in value:
+                            if 'PRESENT IN ORG' in upper_value:
                                 color = self.COLORS['LIGHT_GREEN']
-                            elif 'NOT FOUND IN ORG' in value:
+                            # CORRECCIÓN: Detectar "Not found in org" en cualquier combinación de mayúsculas/minúsculas  
+                            elif 'NOT FOUND IN ORG' in upper_value or upper_value == 'NOT FOUND IN ORG' or orig_value == 'Not found in org':
                                 color = self.COLORS['LIGHT_RED']
-                            elif 'PHASE OUT' in value:
+                                # CORRECCIÓN: Estandarizar el texto mostrado como "Not found in org"
+                                cell.value = 'Not found in org'
+                            elif 'PHASE OUT' in upper_value:
                                 color = self.COLORS['LIGHT_YELLOW']
                             else:
                                 color = self.COLORS['NEUTRAL']
@@ -521,6 +510,7 @@ class ReportGenerator:
         """
         Asegura que el DataFrame tenga todas las columnas necesarias en el orden correcto.
         Utiliza physical_orgs para las columnas de organizaciones físicas.
+        MEJORA: Ahora usa intersección de organizaciones físicas predefinidas y organizaciones en datos.
         """
         # Definir orden de columnas base
         columns = [
@@ -531,8 +521,44 @@ class ReportGenerator:
             'Serial Control match?'
         ]
         
-        # Agregar solo las columnas de Serial Control para cada organización física
-        for org in physical_orgs:
+        # MEJORA: Identificar organizaciones presentes en los datos
+        orgs_in_data = []
+        for col in df.columns:
+            if col.startswith('org ') and 'Serial Control' in col:
+                # Extraer número de organización del nombre de columna
+                org_code = col.replace('org ', '').replace(' Serial Control', '')
+                orgs_in_data.append(org_code)
+        
+        # Ordenar y eliminar duplicados
+        orgs_in_data = sorted(list(set(orgs_in_data)))
+        logger.info(f"Organizaciones encontradas en datos: {orgs_in_data}")
+        
+        # CORRECCIÓN URGENTE: Asegurar que solo se incluyan en el reporte las organizaciones 
+        # físicas que realmente aparecen en los datos de auditoría.
+        # physical_orgs ya debe venir filtrado desde _generate_serial_validation_data
+        
+        # Verificar que estamos usando organizaciones que están tanto en los datos como en la lista de físicas
+        orgs_to_use = sorted(list(set(physical_orgs).intersection(set(orgs_in_data))))
+        
+        # Verificar que las organizaciones físicas recibidas coinciden con las esperadas
+        if set(orgs_to_use) != set(physical_orgs):
+            logger.warning(f"¡ALERTA! Las organizaciones físicas recibidas no coinciden con las encontradas en los datos!")
+            logger.warning(f"Recibidas: {physical_orgs}")
+            logger.warning(f"Encontradas en datos: {orgs_in_data}")
+            logger.warning(f"Usando finalmente: {orgs_to_use}")
+            # Actualizamos physical_orgs para asegurar consistencia
+            physical_orgs = orgs_to_use
+        
+        # Registrar información de diagnóstico
+        logger.info(f"Generando reporte con {len(orgs_to_use)} organizaciones físicas: {orgs_to_use}")
+        
+        # Verificar organizaciones físicas que aparecen en las columnas pero no en los datos
+        extra_orgs = set(orgs_in_data) - set(physical_orgs)
+        if extra_orgs:
+            logger.warning(f"Se encontraron columnas de organizaciones adicionales: {extra_orgs} (estas NO se incluirán en el reporte)")
+        
+        # Agregar columnas de Serial Control solo para las organizaciones físicas que aparecen en los datos
+        for org in orgs_to_use:
             columns.append(f'org {org} Serial Control')  # Agregar 'org' antes de la organización
         
         # Agregar columnas restantes en el orden específico
@@ -556,6 +582,7 @@ class ReportGenerator:
             if col not in df.columns:
                 df[col] = ''
         
+        # Filtrar para incluir solo las columnas definidas (por si hay columnas extras)
         return df[columns]
         
     def _convert_to_dataframe(self, audit_result: AuditResult) -> pd.DataFrame:
@@ -720,8 +747,19 @@ class ReportGenerator:
             # Asegurar que physical_orgs está normalizado
             physical_orgs = [str(org).strip().zfill(2) for org in physical_orgs]
             
-            # Log para verificar las organizaciones físicas
-            logger.info(f"Usando organizaciones físicas para la validación: {physical_orgs}")
+            # CORRECCIÓN URGENTE: Identificar las organizaciones presentes en el documento de auditoría
+            # y usar solo la intersección con la lista de organizaciones físicas
+            orgs_in_audit = df_data['Organization'].astype(str).str.strip().str.zfill(2).unique().tolist()
+            
+            # Crear la intersección entre organizaciones físicas y las presentes en el documento
+            physical_orgs_in_audit = sorted(list(set(physical_orgs).intersection(set(orgs_in_audit))))
+            
+            # Reemplazar la lista completa de physical_orgs por solo las que están en la auditoría
+            physical_orgs = physical_orgs_in_audit
+            
+            # Log para verificar las organizaciones físicas filtradas
+            logger.info(f"Organizaciones físicas antes de filtrar: {len(physical_orgs_in_audit)} de 72")
+            logger.info(f"Usando SOLO las organizaciones físicas presentes en la auditoría: {physical_orgs}")
         
             # Normalizar organizaciones en el DataFrame
             df_data['Organization'] = df_data['Organization'].astype(str).str.strip()
@@ -778,7 +816,7 @@ class ReportGenerator:
 
                 # Inicializar columnas de Serial Control para TODAS las organizaciones físicas
                 for org in physical_orgs:
-                    row[f'org {org} Serial Control'] = 'Not found in org'
+                    row[f'org {org} Serial Control'] = 'Not found in org'  # Usar formato consistente
 
                 # Variables para inventario
                 has_inventory = False
@@ -824,11 +862,25 @@ class ReportGenerator:
                         # Mantener la lógica de no encontrado para inventario
                         row[f'Inventory Status {org}'] = 'Not found in org'
 
-                # Determinar mismatch con mayor consistencia
-                unique_serial_values = set(val for val in serial_values_normalized if val != 'Not found in org')
+                # MODIFICADO: Determinar mismatch con mayor consistencia, excluyendo la organización "01"
+                # Filtrar valores de organizaciones diferentes a "01" para detección de discrepancias
+                org_values_for_comparison = {}
+                
+                for org in physical_orgs:
+                    org_key = f'org {org} Serial Control'
+                    if org != '01' and org_key in row and row[org_key] != 'Not found in org':
+                        org_values_for_comparison[org] = row[org_key]
+                
+                # Calcular valores únicos excluyendo "01" y "Not found in org"
+                # CORRECCIÓN: Usar un formato consistente para "Not found in org"
+                unique_serial_values = set(org_values_for_comparison.values())
+                
+                # Mostrar valores para diagnóstico
+                logger.debug(f"Valores normalizados para parte {part_norm} (excluyendo '01'): {org_values_for_comparison}")
+                logger.debug(f"Valores únicos para comparación: {unique_serial_values}")
                 
                 # Determinar mismatch de dos maneras:
-                # 1. Por detección dinámica (hay diferentes valores de serial control)
+                # 1. Por detección dinámica (hay diferentes valores de serial control, excluyendo org "01")
                 has_value_mismatch = len(unique_serial_values) > 1
                 # 2. Por clasificación previa (está en la lista de mismatches original)
                 was_flagged_as_mismatch = part_norm in mismatched_parts
@@ -836,10 +888,10 @@ class ReportGenerator:
                 # Considerar un mismatch si cualquiera de las dos condiciones se cumple
                 row['Serial Control match?'] = 'Mismatch' if (has_value_mismatch or was_flagged_as_mismatch) else 'Match'
                 
-                # Para debug, registrar la causa del mismatch
+                # Para debug, registrar la causa del mismatch con detalle adicional
                 if row['Serial Control match?'] == 'Mismatch':
-                    reason = "valores diferentes" if has_value_mismatch else "clasificación previa"
-                    logger.debug(f"Parte {part_norm} marcada como Mismatch por {reason}")
+                    reason = f"valores diferentes (excluyendo org '01')" if has_value_mismatch else "clasificación previa"
+                    logger.debug(f"Parte {part_norm} marcada como Mismatch por {reason}. Valores: {org_values_for_comparison}")
 
                 # Actualizar estado de inventario
                 row['Inventory on Hand? Y/N'] = 'Y' if has_inventory else 'N'
@@ -957,11 +1009,13 @@ class ReportGenerator:
 
         validation_data = []
         
+        # IMPLEMENTACIÓN CORREGIDA: Asegurar que org_destination tiene valores correctos
         # Normalizar códigos de organización en org_destination
         normalized_org_dest = [str(org).strip().zfill(2) for org in org_destination]
         logger.info(f"Procesando {len(normalized_org_dest)} organizaciones: {normalized_org_dest}")
+        logger.info(f"DIAGNÓSTICO CRÍTICO - Organizaciones de destino originales: {org_destination}")
         
-        # Helper function para limpiar valores nulos o 'nan'
+        # Helper function mejorada para limpiar valores nulos o 'nan'
         def is_empty_or_nan(value):
             """Determina si un valor es nulo, vacío o representa 'nan'."""
             if value is None:
@@ -974,164 +1028,355 @@ class ReportGenerator:
                     return True
             return False
             
-        for part_number, part_group in df.groupby('Part Number'):
-            # Extraer orgs originales y estado
-            orig_status = part_group['Status'].iloc[0]
-            current_orgs_str = part_group['Current Orgs'].iloc[0]
-            current_orgs = set(org.strip() for org in current_orgs_str.split(',') if org.strip())
+        # CORRECCIÓN: Desactivar la normalización de número de parte para mantener partes con diferencias
+        def normalize_part(part):
+            """
+            CORRECCIÓN: Función modificada para preservar completamente los números de parte originales.
+            Esto es crítico para mantener diferenciados productos como:
+            'SFP-10G-LR-S.ACTUAL.324.MERCK' y 'SFP-10G-LR-S=.ACTUAL.324.MERCK'
+            que son distintos en Oracle.
             
+            Solo se eliminan espacios en blanco al inicio y final, y se asegura que sea string.
+            """
+            if part is None:
+                return ''
+            
+            # Simplemente retornar el string original con espacios iniciales/finales eliminados
+            # Mantener exactamente igual el resto del texto (incluyendo case sensitivity)
+            return str(part).strip()  # No convertir a mayúsculas para mantener case original también
+        
+        # DIAGNÓSTICO: Análisis de formatos de números de parte
+        part_formats = {}
+        for part in df['Part Number'].unique():
+            original = str(part)
+            normalized = normalize_part(part)
+            if original != normalized:
+                part_formats[original] = normalized
+                
+        if part_formats:
+            logger.info(f"Encontrados {len(part_formats)} formatos diferentes de números de parte")
+            for orig, norm in list(part_formats.items())[:5]:  # Mostrar solo los primeros 5 ejemplos
+                logger.info(f"Formato original: '{orig}' → Normalizado: '{norm}'")
+        
+        # Crear una columna normalizada para agrupar por número de parte normalizado
+        df_normalized = df.copy()
+        df_normalized['Part Number Normalized'] = df['Part Number'].apply(normalize_part)
+        
+        # Función para obtener el programa desde el número de parte (e.g., MERCK, CSCO)
+        def extract_program(part_number):
+            """Extrae el programa del número de parte cuando tiene formato [BASE].[ACTUAL|PLANNED].[ID].[PROGRAM]"""
+            parts = str(part_number).split('.')
+            if len(parts) >= 4:
+                return parts[3].upper()
+            return ""
+        
+        # DEPURACIÓN ESPECIAL: Verificar cuántas partes actualmente tienen el estado "Missing in Org"
+        if 'Status' in df.columns:
+            missing_orgs_count = len(df[df['Status'] == 'Missing in Org'])
+            logger.info(f"DIAGNÓSTICO CRÍTICO: En los datos originales hay {missing_orgs_count} registros con estado 'Missing in Org'")
+        
+        # PARCHE IMPORTANTE: Verificar si hay partes con "Missing in Org" en el estado original
+        # y asegurar que se encuentren en el reporte final
+        missing_parts_original = set()
+        if 'Status' in df.columns and 'Part Number' in df.columns:
+            missing_mask = df['Status'] == 'Missing in Org'
+            if missing_mask.any():
+                missing_parts_original = set(df.loc[missing_mask, 'Part Number'].unique())
+                sample_parts = list(missing_parts_original)[:5]
+                logger.info(f"DIAGNÓSTICO CRÍTICO: Encontradas {len(missing_parts_original)} partes con estado 'Missing in Org' en datos originales")
+                logger.info(f"Ejemplos: {sample_parts}")
+        
+        # Agrupar por número de parte normalizado para mejorar la detección
+        parts_processed = 0
+        for _, part_group in df_normalized.groupby('Part Number Normalized'):
+            parts_processed += 1
+            if parts_processed % 100 == 0:
+                logger.info(f"Procesadas {parts_processed} partes...")
+                
+            # Usar el primer número de parte original como representante
+            part_number = part_group['Part Number'].iloc[0]
+            part_norm = normalize_part(part_number)
+            
+            # Extraer programa del número de parte (para diagnóstico)
+            program = extract_program(part_number)
+            if program:
+                logger.debug(f"Parte {part_number} asociada al programa: {program}")
+            
+            # Verificar si esta parte estaba en la lista original con "Missing in Org"
+            is_originally_missing = part_number in missing_parts_original
+            if is_originally_missing:
+                logger.debug(f"DIAGNÓSTICO: Parte {part_number} originalmente marcada como 'Missing in Org'")
+            
+            # Log para diagnóstico
+            if len(part_group['Part Number'].unique()) > 1:
+                logger.info(f"Diferentes variantes del mismo número de parte encontradas: {part_group['Part Number'].unique()} → Normalizado como: {part_norm}")
+            
+            # Extraer orgs originales y estado - ATENCIÓN ESPECIAL A ESTADO "Missing in Org"
+            orig_status = part_group['Status'].iloc[0]
+            if orig_status == 'Missing in Org':
+                logger.debug(f"ATENCIÓN: Parte {part_number} tiene estado original 'Missing in Org'")
+            
+            # Extraer organizaciones actuales con mejor manejo
+            current_orgs = set()
+            missing_orgs_fields = []
+            
+            # NUEVO: Detectar explícitamente organizaciones faltantes del campo "Missing Orgs" si existe
+            for _, row in part_group.iterrows():
+                # Procesar organizaciones actuales
+                if 'Current Orgs' in row and not is_empty_or_nan(row['Current Orgs']):
+                    orgs_list = [org.strip().zfill(2) for org in str(row['Current Orgs']).split(',') if org.strip()]
+                    current_orgs.update(orgs_list)
+                
+                # IMPORTANTE: Procesar organizaciones faltantes si están explícitamente listadas
+                if 'Missing Orgs' in row and not is_empty_or_nan(row['Missing Orgs']):
+                    orgs_list = [org.strip().zfill(2) for org in str(row['Missing Orgs']).split(',') if org.strip()]
+                    missing_orgs_fields.extend(orgs_list)
+            
+            # Convertir a string para el campo 'Current Orgs'
+            current_orgs_str = ','.join(sorted(current_orgs))
+            
+            # Inicializar fila con número de parte
             row = {'Part Number': part_number}
             
             # Normalizar columna Organization para comparaciones consistentes
-            part_group_normalized = part_group.copy()
             if 'Organization' in part_group.columns:
-                part_group_normalized['Organization'] = part_group['Organization'].astype(str).str.strip().str.zfill(2)
-                
-            # Reemplazar cualquier valor NaN en las columnas 'Organization' y 'Serial Control'
-            if 'Organization' in part_group.columns:
-                part_group['Organization'] = part_group['Organization'].fillna('')
-            if 'Serial Control' in part_group.columns:
-                part_group['Serial Control'] = part_group['Serial Control'].fillna('')   
+                part_group['Organization'] = part_group['Organization'].astype(str).str.strip().str.zfill(2)
             
-            # Inicializar columnas Serial Control para todas las organizaciones con el valor predeterminado
+            # Inicializar columnas Serial Control para todas las organizaciones
             for org in normalized_org_dest:
                 row[f'org {org} Serial Control'] = 'Not found in org'
              
-            # Procesar organizaciones - solo para Serial Control
+            # MEJORADO: Procesamiento de organizaciones con mejor detección
             missing_orgs = []
+            
+            # DIAGNÓSTICO: Verificar si hay conflictos entre org_destination y current_orgs
+            orgs_in_current_not_in_dest = [org for org in current_orgs if org not in normalized_org_dest]
+            if orgs_in_current_not_in_dest:
+                logger.warning(f"ALERTA: Parte {part_number} tiene organizaciones actuales que no están en org_destination: {orgs_in_current_not_in_dest}")
+            
+            # Verificar cada organización de destino
             for org in normalized_org_dest:
-                # Buscar la organización normalizada
-                org_data = part_group_normalized[part_group_normalized['Organization'] == org]
+                # Buscar la organización en el grupo
+                org_mask = part_group['Organization'].astype(str).str.strip().str.zfill(2) == org
+                org_data = part_group[org_mask]
                 
-                # Verificar si la organización está en current_orgs
-                is_present = any(org == o.strip().zfill(2) for o in current_orgs if o.strip())
+                # CORREGIDO: Verificar si la organización está presente en cualquier formato
+                is_present = False
+                
+                # 1. Verificar en current_orgs (normalizado)
+                if org in current_orgs:
+                    is_present = True
+                    logger.debug(f"Parte {part_number}: Organización {org} encontrada en current_orgs")
+                
+                # 2. Verificar en los datos directamente
+                elif not org_data.empty:
+                    is_present = True
+                    logger.debug(f"Parte {part_number}: Organización {org} encontrada en datos")
+                
+                # 3. Verificar en datos como parte de organization_code
+                else:
+                    # Buscar de forma más flexible en caso de que el formato sea diferente
+                    for _, r in part_group.iterrows():
+                        if 'Organization' in r:
+                            org_codes = [o.strip().zfill(2) for o in str(r['Organization']).split(',') if o.strip()]
+                            if org in org_codes:
+                                is_present = True
+                                logger.debug(f"Parte {part_number}: Organización {org} encontrada en organization_code")
+                                break
                 
                 # Establecer valor de Serial Control explícitamente
                 if not org_data.empty and 'Serial Control' in org_data.columns:
-                    # Obtener el primer valor o usar un valor por defecto
-                    serial_value = org_data['Serial Control'].iloc[0]
-                    
-                    # Manejar valores nulos con verificación robusta
-                    if is_empty_or_nan(serial_value):
-                        row[f'org {org} Serial Control'] = 'Not found in org'
-                    else:
-                        # Normalizar valores conocidos
-                        serial_str = str(serial_value).strip().upper()
-                        if serial_str in ('YES', 'Y'):
-                            row[f'org {org} Serial Control'] = 'Dynamic entry at inventory receipt'
-                        elif serial_str in ('NO', 'N'):
-                            row[f'org {org} Serial Control'] = 'No serial number control'
-                        else:
-                            # Verificar una vez más que no sea un valor nulo camuflado
-                            if is_empty_or_nan(serial_str):
-                                row[f'org {org} Serial Control'] = 'Not found in org'
-                            else:
-                                row[f'org {org} Serial Control'] = str(serial_value)
+                    # Obtener el primer valor no nulo
+                    serial_values = org_data['Serial Control'].dropna()
+                    if not serial_values.empty:
+                        serial_value = serial_values.iloc[0]
+                        
+                        # Normalizar usando un método consistente
+                        serial_str = self._normalize_serial_value(serial_value)
+                        row[f'org {org} Serial Control'] = serial_str
                 
-                # Asegurar que no haya valores nulos
-                if is_empty_or_nan(row.get(f'org {org} Serial Control')):
-                    row[f'org {org} Serial Control'] = 'Not found in org'
-                
-                # Agregar a missing_orgs si no está presente
+                # Agregar a missing_orgs solo si realmente no está presente
                 if not is_present:
                     missing_orgs.append(org)
+                    logger.debug(f"Parte {part_number}: Organización {org} marcada como faltante")
             
-            # Determinar Serial Control match/mismatch
-            serial_values = []
-            for org in normalized_org_dest:
-                value = row.get(f'org {org} Serial Control')
-                
-                # Última comprobación antes de usar el valor
-                if is_empty_or_nan(value):
-                    row[f'org {org} Serial Control'] = 'Not found in org'
-                    value = 'Not found in org'
-                    
-                if value != 'Not found in org':
-                    serial_values.append(value)
-            
-            has_mismatch = len(set(serial_values)) > 1 if serial_values else False
-                        
-            row.update({
-                'Item Status': orig_status,
-                'Current Orgs': current_orgs_str,
-                'Organization code mismatch': ','.join(missing_orgs) if missing_orgs else 'None',
-                'Action Required': f"Create in Org {','.join(missing_orgs)}" if missing_orgs else 'None',
-                'Audit Status': '',
-                'Organization Status': 'Mismatch' if missing_orgs else 'Match'
-            })
-            
-            # Verificación final de todas las columnas de Serial Control en esta fila
+            # Asegurar valores consistentes en columnas de Serial Control
             for key in list(row.keys()):
                 if 'Serial Control' in key and is_empty_or_nan(row[key]):
                     row[key] = 'Not found in org'
             
+            # CORRECTION: No es necesario analizar serial_values para determinar el estado,
+            # ya que solo nos importa si la organización está presente o no.
+            
+            # CORRECCIÓN IMPORTANTE: Verificar si hay organizaciones requeridas donde la parte no está presente
+            missing_in_required_orgs = []
+            for org in normalized_org_dest:
+                org_key = f'org {org} Serial Control'
+                if org_key in row:
+                    # Verificar si la parte no está presente o tiene valor "Not found in org" o NaN
+                    value = row[org_key]
+                    if value == 'Not found in org' or value == 'nan' or pd.isna(value) or is_empty_or_nan(value):
+                        missing_in_required_orgs.append(org)
+                        # Para diagnóstico
+                        logger.debug(f"Parte {part_number}: Organización {org} marcada como faltante porque valor serial es: '{value}'")
+            
+            # INCORPORAR organizaciones explícitamente definidas como faltantes en los datos originales
+            if missing_orgs_fields:
+                missing_orgs_fields = list(set(missing_orgs_fields))  # Eliminar duplicados
+                logger.debug(f"Parte {part_number}: Organizaciones explícitamente marcadas como faltantes: {missing_orgs_fields}")
+                # Añadir solo las que están en la lista de destino
+                for org in missing_orgs_fields:
+                    if org in normalized_org_dest and org not in missing_orgs and org not in missing_in_required_orgs:
+                        missing_in_required_orgs.append(org)
+                        logger.debug(f"Parte {part_number}: Añadida organización {org} desde campo 'Missing Orgs'")
+            
+            # FORZAR el estado "Missing in Org" si la parte estaba originalmente marcada así
+            if is_originally_missing:
+                # Si no hay organizaciones faltantes detectadas, pero la parte estaba marcada originalmente,
+                # tratar de recuperar la información
+                if orig_status == 'Missing in Org' and not missing_orgs and not missing_in_required_orgs:
+                    # Buscar cualquier organización de destino que no esté en current_orgs
+                    forced_missing = [org for org in normalized_org_dest if org not in current_orgs]
+                    if forced_missing:
+                        logger.warning(f"RECUPERACIÓN: Parte {part_number} originalmente 'Missing in Org', forzando organizaciones faltantes: {forced_missing}")
+                        missing_in_required_orgs.extend(forced_missing)
+            
+            # Unir con missing_orgs para tener la lista completa de orgs faltantes (eliminar duplicados)
+            all_missing_orgs = sorted(list(set(missing_orgs + missing_in_required_orgs)))
+            
+            # FORZAR un valor para all_missing_orgs si la parte tenía estado "Missing in Org" pero 
+            # no hemos detectado organizaciones faltantes
+            if orig_status == 'Missing in Org' and not all_missing_orgs:
+                logger.warning(f"ALERTA CRÍTICA: Parte {part_number} con estado original 'Missing in Org' no tiene organizaciones faltantes detectadas.")
+                
+                # Comparar con todas las organizaciones de destino
+                potential_missing = [org for org in normalized_org_dest if org not in current_orgs]
+                
+                if potential_missing:
+                    logger.warning(f"RECUPERACIÓN: Añadiendo organizaciones potencialmente faltantes: {potential_missing}")
+                    all_missing_orgs = sorted(potential_missing)
+                else:
+                    # Si todo falla, marcar como faltante la primera org que no esté en current_orgs
+                    # o la primera org de la lista de destino si no hay mejor opción
+                    default_missing = next((org for org in normalized_org_dest if org not in current_orgs), normalized_org_dest[0] if normalized_org_dest else None)
+                    if default_missing:
+                        logger.warning(f"RECUPERACIÓN DE EMERGENCIA: Marcando organización {default_missing} como faltante para preservar estado")
+                        all_missing_orgs = [default_missing]
+            
+            # Actualizar fila con información de estado
+            status_override = 'Mismatch' if all_missing_orgs else 'Match'
+            
+            # Si la parte tenía originalmente "Missing in Org" y no hemos detectado orgs faltantes,
+            # forzar el estado a "Mismatch" para preservar la intención original
+            if orig_status == 'Missing in Org' and status_override == 'Match':
+                logger.warning(f"FORZANDO estado Mismatch para parte {part_number} porque originalmente era 'Missing in Org'")
+                status_override = 'Mismatch'
+                
+                # Si necesitamos forzar a Mismatch pero no tenemos orgs faltantes,
+                # usar un valor especial para indicar que hay problema pero no sabemos cuál org falta
+                if not all_missing_orgs:
+                    all_missing_orgs = ['Unknown org']
+            
+            row.update({
+                'Item Status': orig_status,
+                'Current Orgs': current_orgs_str,
+                'Organization code mismatch': ','.join(all_missing_orgs) if all_missing_orgs else 'None',
+                'Action Required': f"Create in Org {','.join(all_missing_orgs)}" if all_missing_orgs else 'None',
+                'Audit Status': '',
+                # CORRECCIÓN: Marcar como "Mismatch" si falta en alguna org requerida
+                'Organization Status': status_override
+            })
+            
+            # Log para diagnóstico cuando hay orgs faltantes
+            if all_missing_orgs:
+                logger.debug(f"Parte {part_number}: Marcada con 'Mismatch' por faltar en orgs: {all_missing_orgs}")
+                if program:
+                    logger.info(f"ALERTA: Parte {part_number} del programa {program} falta en organizaciones: {all_missing_orgs}")
+            
             validation_data.append(row)
+            
+            # Log detallado para diagnóstico de partes con discrepancias
+            if missing_orgs:
+                logger.debug(f"Parte {part_number}: Organizaciones faltantes detectadas: {missing_orgs}")
+                logger.debug(f"Current Orgs: {current_orgs_str}")
+                logger.debug(f"Estado final: {row['Organization Status']}")
         
         # Crear DataFrame
         result_df = pd.DataFrame(validation_data)
         logger.info(f"DataFrame creado con {len(result_df)} filas")
         
-        # Asegurar que no haya NaN en ninguna columna, con énfasis en las de Serial Control
-        serial_control_cols = [col for col in result_df.columns if 'Serial Control' in col]
-        logger.info(f"Limpiando valores nulos en {len(serial_control_cols)} columnas de Serial Control")
+        # Asegurar consistencia en todos los valores
+        self._clean_dataframe_values(result_df)
         
-        # 1. Reemplazar NaN con "Not found in org" en columnas de Serial Control
-        for col in serial_control_cols:
-            # Usando múltiples enfoques para garantizar que se capturen todos los casos posibles
-            result_df[col] = result_df[col].fillna('Not found in org')
-            result_df[col] = result_df[col].replace({None: 'Not found in org'})
-            result_df[col] = result_df[col].replace({'nan': 'Not found in org', 'NaN': 'Not found in org'})
-            result_df[col] = result_df[col].replace({'None': 'Not found in org', 'none': 'Not found in org'})
-            result_df[col] = result_df[col].replace({'': 'Not found in org'})
+        # DIAGNÓSTICO FINAL: Verificar cuántas partes están marcadas como Mismatch en el resultado
+        mismatch_count = len(result_df[result_df['Organization Status'] == 'Mismatch'])
+        match_count = len(result_df[result_df['Organization Status'] == 'Match'])
+        logger.info(f"RESULTADO FINAL: {mismatch_count} de {len(result_df)} partes marcadas con 'Mismatch'")
+        logger.info(f"RESULTADO FINAL: {match_count} de {len(result_df)} partes marcadas con 'Match'")
+        
+        # Comparar con los datos originales
+        if 'missing_parts_original' in locals() and missing_parts_original:
+            missing_parts_result = set(result_df[result_df['Organization Status'] == 'Mismatch']['Part Number'])
+            orig_vs_new_diff = len(missing_parts_original) - len(missing_parts_result)
+            logger.info(f"COMPARACIÓN CRÍTICA: {len(missing_parts_original)} partes originalmente 'Missing in Org' vs {len(missing_parts_result)} en resultado")
+            logger.info(f"Diferencia: {orig_vs_new_diff} ({100*orig_vs_new_diff/max(1,len(missing_parts_original)):.1f}%)")
             
-            # Convertir a string para manejar cualquier valor no string
-            result_df[col] = result_df[col].astype(str)
-            
-            # Usar función lambda para capturar casos adicionales
-            result_df[col] = result_df[col].apply(
-                lambda x: 'Not found in org' if x.lower() in ('nan', 'none', 'null', '') else x
-            )
+            # Verificar si hay partes que debían estar marcadas como faltantes pero no lo están
+            missing_but_not_in_result = missing_parts_original - missing_parts_result
+            if missing_but_not_in_result:
+                logger.warning(f"ALERTA CRÍTICA: {len(missing_but_not_in_result)} partes originalmente 'Missing in Org' no están marcadas en el resultado")
+                sample = list(missing_but_not_in_result)[:5]
+                logger.warning(f"Ejemplos: {sample}")
         
-        # 2. Reemplazar NaN con cadena vacía en otras columnas
-        for col in result_df.columns:
-            if col not in serial_control_cols:
-                result_df[col] = result_df[col].fillna('')
-        
-        # Simplificar ordenamiento de columnas
-        base_cols = ['Part Number']
-        serial_control_cols = [col for col in result_df.columns if 'Serial Control' in col and col != 'Organization Status']
-        remaining_cols = [
-            'Current Orgs',
-            'Organization code mismatch',
-            'Action Required',
-            'Item Status',
-            'Audit Status',
-            'Organization Status'
-        ]
-        
-        # Asegurar que todas las columnas existan
-        for col in base_cols + remaining_cols:
-            if col not in result_df.columns:
-                result_df[col] = ''
-        
-        # Solo incluir columnas que existen en el DataFrame
-        existing_cols = [col for col in base_cols + serial_control_cols + remaining_cols if col in result_df.columns]
-        result_df = result_df[existing_cols]
-        
-        # Verificación FINAL EXHAUSTIVA para columnas de Serial Control
-        for col in serial_control_cols:
-            # Convertir a string nuevamente para asegurar uniformidad de tipos
-            result_df[col] = result_df[col].astype(str)
-            
-            # Capturar variantes como 'nan ' (con espacios), 'NaN', etc.
-            mask = result_df[col].str.lower().str.strip().isin(['nan', 'none', 'null', ''])
-            if mask.any():
-                logger.warning(f"¡Último reemplazo! Encontradas {mask.sum()} ocurrencias de nulos en {col}")
-                result_df.loc[mask, col] = 'Not found in org'
-        
-        # Verificar que no quede ninguna columna con valores NaN antes de analizar
+        # Verificación final antes de retornar
         self._analyze_step(result_df, "AFTER ORG VALIDATION")
         return result_df
+    
+    def _clean_dataframe_values(self, df: pd.DataFrame) -> None:
+        """
+        Limpia valores inconsistentes en el DataFrame.
+        Enfoque especial en columnas de Serial Control.
+        """
+        # Identificar columnas de Serial Control
+        serial_control_cols = [col for col in df.columns if 'Serial Control' in col]
+        logger.info(f"Limpiando valores en {len(serial_control_cols)} columnas de Serial Control")
+        
+        # 1. Limpiar columnas de Serial Control
+        for col in serial_control_cols:
+            # Convertir a string para manejar cualquier valor no string
+            df[col] = df[col].astype(str)
+            
+            # CORRECCIÓN: Estandarizar el uso de "Not found in org" para mantener consistencia en todo el reporte
+            df[col] = df[col].fillna('Not found in org')
+            # Ampliar el diccionario de reemplazo para capturar más variantes
+            df[col] = df[col].replace({
+                None: 'Not found in org',
+                'nan': 'Not found in org', 
+                'NaN': 'Not found in org',
+                'Nan': 'Not found in org',
+                'None': 'Not found in org', 
+                'none': 'Not found in org',
+                'NONE': 'Not found in org',
+                '': 'Not found in org',
+                'NOT FOUND IN ORG': 'Not found in org',  # Asegurar consistencia de caso
+                'not found in org': 'Not found in org',
+                'Not Found In Org': 'Not found in org',
+                'NOT FOUND': 'Not found in org'
+            })
+            
+            # Normalizar valores
+            df[col] = df[col].apply(self._normalize_serial_value)
+            
+            # Capturar valores atípicos
+            mask = df[col].str.lower().str.strip().isin(['nan', 'none', 'null', ''])
+            if mask.any():
+                logger.warning(f"Encontradas {mask.sum()} ocurrencias de nulos en {col}")
+                df.loc[mask, col] = 'Not found in org'
+        
+        # 2. Limpiar otras columnas
+        for col in df.columns:
+            if col not in serial_control_cols:
+                df[col] = df[col].fillna('')
             
     
     def _write_main_results(
@@ -1369,8 +1614,9 @@ class ReportGenerator:
             
             
     def _format_inventory_status(self, inv_data: Dict) -> str:
+        """Formatea el estado de inventario con formato de texto consistente."""
         if not inv_data:
-            return 'Not found in org'
+            return 'Not found in org'  # CORRECCIÓN: Formato consistente para "Not found in org"
         
         quantity = inv_data.get('quantity', 0)
         return 'Y' if quantity > 0 else 'N'  # Simplificado y solo cantidad

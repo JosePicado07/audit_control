@@ -406,33 +406,45 @@ class ExcelRepository:
             
             normalized_orgs = set()
             
-            # Separar por "and add" o "and" si existe
-            parts = re.split(r'\s+(?:and add|and)\s+', org_str, flags=re.IGNORECASE)
+            # MEJORA: Separa explícitamente por "and add" antes de otros patrones
+            # Esto garantiza que "WWT_SING_ORGS_09_04_40_43_51_85_88_100 and add 117,118" se procese correctamente
+            add_parts = re.split(r'\s+and\s+add\s+', org_str, flags=re.IGNORECASE)
             
-            for part in parts:
-                # Handle WWT_ORGS pattern
-                if 'WWT' in part.upper():
-                    # Extract all numbers from WWT pattern
-                    numbers = re.findall(r'\d+', part)
-                    for num in numbers:
-                        if num.isdigit():
-                            # Preserve 3-digit codes as is
-                            if len(num) == 3:
-                                normalized_orgs.add(num)
-                            else:
-                                # Usar .zfill directamente en str, no en Series
-                                normalized_orgs.add(num.zfill(2))
-                else:
-                    # Handle comma-separated values
-                    numbers = re.findall(r'\d+', part)
-                    for num in numbers:
-                        if num.isdigit():
-                            # Preserve 3-digit codes as is
-                            if len(num) == 3:
-                                normalized_orgs.add(num)
-                            else:
-                                # Usar .zfill directamente en str, no en Series
-                                normalized_orgs.add(num.zfill(2))
+            # Procesar la parte principal (antes de "and add")
+            main_part = add_parts[0]
+            
+            # Primero, procesar patrones WWT_* en la parte principal
+            if 'WWT' in main_part.upper():
+                # Extract all numbers from WWT pattern
+                numbers = re.findall(r'\d+', main_part)
+                for num in numbers:
+                    if num.isdigit():
+                        # Preserve 3-digit codes as is
+                        if len(num) == 3:
+                            normalized_orgs.add(num)
+                        else:
+                            # Usar .zfill directamente en str, no en Series
+                            normalized_orgs.add(num.zfill(2))
+            
+            # Después, procesar explícitamente las partes adicionales ("and add")
+            for i in range(1, len(add_parts)):
+                additional_part = add_parts[i]
+                logger.debug(f"Procesando parte adicional: '{additional_part}'")
+                
+                # Tratar comas, espacios y guiones como separadores para números adicionales
+                add_numbers = re.split(r'[,\s_-]+', additional_part)
+                for num in add_numbers:
+                    num = num.strip()
+                    if num and num.isdigit():
+                        # Preserve 3-digit codes as is
+                        if len(num) == 3:
+                            normalized_orgs.add(num)
+                            logger.debug(f"Agregada organización adicional: {num}")
+                        else:
+                            # Usar .zfill directamente en str
+                            normalized = num.zfill(2)
+                            normalized_orgs.add(normalized)
+                            logger.debug(f"Agregada organización adicional normalizada: {normalized} (original: {num})")
             
             # Validar y retornar resultados ordenados
             valid_orgs = []
