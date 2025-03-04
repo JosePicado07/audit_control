@@ -75,6 +75,7 @@ class AuditItem:
     part_number: str
     organization: str
     status: str
+    item_status : str = ''
     action_required: Optional[str] = None
     current_orgs : List[str] = field(default_factory=list)
     missing_orgs: List[str] = field(default_factory=list)

@@ -414,6 +414,7 @@ class AuditProcessor:
                         'serial_control': current_serial,
                         'base_serial': base_serial,
                         'has_mismatch': True,
+                        'item_status': part_data['Item Status'].iloc[0] if 'Item Status' in part_data.columns else '',
                         **part_pattern['part_info'],
                         'status': 'Mismatch'
                     })
@@ -1215,6 +1216,9 @@ class AuditProcessor:
                         continue
                     processed_orgs.add(organization)
                     
+                    item_status = row.get('Item Status', '') if 'Item Status' in row else ''
+
+                    
                     if organization in base_info.get('missing_orgs', []):
                         status = 'Missing in Org'
                         action = f"Create in Org {organization}"
@@ -1268,6 +1272,7 @@ class AuditProcessor:
                         part_number=part_number,
                         organization=organization,
                         status=status,
+                        item_status= row.get('Item Status',''),
                         action_required=action,
                         current_orgs=base_info.get('current_orgs', []),
                         missing_orgs=base_info.get('missing_orgs', []),
@@ -1284,6 +1289,10 @@ class AuditProcessor:
                 for missing_org in missing_to_process:
                     print(f"Creando AuditItem para org faltante {missing_org}")
                     
+                    item_status = ''
+                    if 'base_info' in base_info and isinstance(base_info['base_info'], dict):
+                        item_status = base_info['base_info'].get('Item Status', '')
+                    
                     serial_control_info = SerialControlInfo(
                         current_value="Not found",
                         is_active=False
@@ -1298,6 +1307,7 @@ class AuditProcessor:
                         part_number=part_number,
                         organization=missing_org,
                         status='Missing in Org',
+                        item_status= item_status,
                         action_required=f"Create in Org {missing_org}",
                         current_orgs=base_info.get('current_orgs', []),
                         missing_orgs=base_info.get('missing_orgs', []),

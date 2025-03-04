@@ -65,7 +65,6 @@ class ExcelRepository:
         }
         
         # Required columns for inventory files (case-insensitive)
-        # Required columns for inventory files (case-insensitive)
         self.inventory_required_columns = {
             # Columnas clave para identificación
             'ITEM NUMBER': str,                    # Campo principal para coincidencia de partes
