@@ -380,81 +380,66 @@ class ExcelRepository:
             logger.error(f"Error retrieving program requirements for contract {contract}: {str(e)}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
             raise
-        
+
     def _process_org_codes(self, org_codes: str) -> List[str]:
         """
-        Process organization codes with enhanced validation and error handling.
-        
+        Process organization codes with full support for different patterns, prefixes, and variations.
+
         Args:
             org_codes: String containing organization codes
-            
+
         Returns:
             List[str]: List of validated organization codes
         """
         try:
             if pd.isna(org_codes):
                 return []
-                
+                    
             # Convert to string and clean float values
             org_str = str(org_codes).strip()
             if org_str.endswith('.0'):
                 org_str = org_str[:-2]
-                
+                    
             if not org_str:
                 return []
             
             normalized_orgs = set()
+
+            # Separar usando palabras clave comunes como "and", "add", "&", "+"  
+            add_parts = re.split(r'\s+and\s+add\s+|\s+and\s+|\s*add\s*|\s*&\s*|\s*\+\s*', org_str, flags=re.IGNORECASE)
             
-            # MEJORA: Separa explícitamente por "and add" antes de otros patrones
-            # Esto garantiza que "WWT_SING_ORGS_09_04_40_43_51_85_88_100 and add 117,118" se procese correctamente
-            add_parts = re.split(r'\s+and\s+add\s+', org_str, flags=re.IGNORECASE)
-            
-            # Procesar la parte principal (antes de "and add")
+            # Procesar la parte principal (antes de cualquier "and add" o similar)
             main_part = add_parts[0]
-            
-            # Primero, procesar patrones WWT_* en la parte principal
-            if 'WWT' in main_part.upper():
-                # Extract all numbers from WWT pattern
-                numbers = re.findall(r'\d+', main_part)
-                for num in numbers:
-                    if num.isdigit():
-                        # Preserve 3-digit codes as is
-                        if len(num) == 3:
-                            normalized_orgs.add(num)
-                        else:
-                            # Usar .zfill directamente en str, no en Series
-                            normalized_orgs.add(num.zfill(2))
-            
-            # Después, procesar explícitamente las partes adicionales ("and add")
-            for i in range(1, len(add_parts)):
-                additional_part = add_parts[i]
-                logger.debug(f"Procesando parte adicional: '{additional_part}'")
-                
-                # Tratar comas, espacios y guiones como separadores para números adicionales
-                add_numbers = re.split(r'[,\s_-]+', additional_part)
-                for num in add_numbers:
-                    num = num.strip()
-                    if num and num.isdigit():
-                        # Preserve 3-digit codes as is
-                        if len(num) == 3:
-                            normalized_orgs.add(num)
-                            logger.debug(f"Agregada organización adicional: {num}")
-                        else:
-                            # Usar .zfill directamente en str
-                            normalized = num.zfill(2)
-                            normalized_orgs.add(normalized)
-                            logger.debug(f"Agregada organización adicional normalizada: {normalized} (original: {num})")
-            
-            # Validar y retornar resultados ordenados
-            valid_orgs = []
-            for org in normalized_orgs:
-                # Validar que sean números y tengan longitud correcta
-                if org.isdigit() and (2 <= len(org) <= 3):
-                    valid_orgs.append(org)
-                    
+
+            # Extraer números de cualquier prefijo
+            numbers = re.findall(r'\d+', main_part)
+            for num in numbers:
+                normalized_orgs.add(num.zfill(2))
+
+            # Manejar casos con "No ORGs" o "per Shannon"
+            if "No ORGs" in org_str:
+                no_orgs_numbers = re.findall(r'\d+', org_str)
+                for num in no_orgs_numbers:
+                    normalized_orgs.add(num.zfill(2))
+
+            if "per shannon" in org_str.lower():
+                shannon_numbers = re.findall(r'\d+', org_str)
+                for num in shannon_numbers:
+                    normalized_orgs.add(num.zfill(2))
+
+            # Procesar los números adicionales después de "and add", "and", "add", "&", "+"
+            for part in add_parts[1:]:
+                logger.debug(f"Processing additional part: '{part}'")
+                additional_numbers = re.findall(r'\d+', part)
+                for num in additional_numbers:
+                    normalized_orgs.add(num.zfill(2))
+                    logger.debug(f"Added additional organization: {num.zfill(2)}")
+
+            # Retornar resultados ordenados y únicos
+            valid_orgs = sorted(normalized_orgs)
             logger.debug(f"Processed org codes: Input='{org_codes}' Output={valid_orgs}")
-            return sorted(valid_orgs)
-            
+            return valid_orgs
+                
         except Exception as e:
             logger.error(f"Error processing org codes: {str(e)}")
             logger.error(f"Input value: {org_codes}")
