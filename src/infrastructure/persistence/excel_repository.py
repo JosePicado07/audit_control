@@ -289,12 +289,23 @@ class ExcelRepository:
             raise
 
     def get_program_requirements(self, contract: str) -> Dict[str, Any]:
-        try:            
+        try:
             if not self.program_requirements_file.exists():
                 raise FileNotFoundError(f"Program requirements file not found: {self.program_requirements_file}")
             
-            # Read Excel file with validation
-            df = pd.read_excel(self.program_requirements_file, engine='openpyxl')
+            # Define dtypes to force string reading for org columns
+            dtypes = {
+                'CONTRACT': str,
+                'ORG FOR SERIAL CONTROL COMPARISION': str,
+                'ORGANIZATION CODE (PHYSICAL ORGS)': str,
+                'ORGANIZATION CODE (DROPSHIP ORGS)': str,
+                'ITEM ORG DESTINATION THAT CAN BE USED + OTHER ORGS': str,
+                'DOES PROGRAM TRANSACT INTERNATIONALLY?': str,
+                'STATUS': str
+            }
+            
+            # Read Excel file with specified dtypes
+            df = pd.read_excel(self.program_requirements_file, engine='openpyxl', dtype=dtypes)
             df = self._normalize_columns(df)
             
             # Required columns validation
@@ -328,13 +339,17 @@ class ExcelRepository:
             base_org = str(base_org).strip()
             if base_org.endswith('.0'):
                 base_org = base_org[:-2]
-            # Usar .zfill directamente en str, no en Series
             base_org = base_org.zfill(2)
             
-            # Process organizations from Item Org Destination - PRINCIPAL SOURCE
+            # Process organizations
             destination_orgs_raw = program_data['ITEM ORG DESTINATION THAT CAN BE USED + OTHER ORGS'].iloc[0]
             physical_orgs_raw = program_data['ORGANIZATION CODE (PHYSICAL ORGS)'].iloc[0]
             dropship_orgs_raw = program_data['ORGANIZATION CODE (DROPSHIP ORGS)'].iloc[0]
+            
+            # Add debug log for raw input
+            logger.debug(f"Raw input before processing - Destination: {destination_orgs_raw}")
+            logger.debug(f"Raw input before processing - Physical: {physical_orgs_raw}")
+            logger.debug(f"Raw input before processing - Dropship: {dropship_orgs_raw}")
             
             destination_orgs = self._process_org_codes(destination_orgs_raw)
             physical_orgs = self._process_org_codes(physical_orgs_raw)
@@ -343,7 +358,6 @@ class ExcelRepository:
             all_orgs = destination_orgs + physical_orgs + dropship_orgs
             unique_orgs = sorted(list(set(all_orgs)))
             
-            # Add these debug statements to verify
             logger.debug(f"Raw destination orgs: {destination_orgs_raw}")
             logger.debug(f"Processed destination orgs: {destination_orgs}")
             logger.debug(f"Raw physical orgs: {physical_orgs_raw}")
@@ -355,18 +369,15 @@ class ExcelRepository:
             if not destination_orgs:
                 raise ValueError(f"Item Org Destination organizations are required for contract {contract}")
             
-            # Build requirements dict manteniendo los datos originales pero usando destination_orgs
             requirements = {
                 'contract': contract,
                 'base_org': base_org,
-                'org_destination': unique_orgs,  
-                'physical_orgs':physical_orgs,
+                'org_destination': unique_orgs,
+                'physical_orgs': physical_orgs,
                 'dropship_orgs': dropship_orgs,
                 'international': bool(program_data['DOES PROGRAM TRANSACT INTERNATIONALLY?'].iloc[0]),
                 'status': program_data['STATUS'].iloc[0]
             }
-            if not requirements['org_destination']:
-                raise ValueError(f"No valid organizations found for contract {contract}")
             
             logger.debug(f"Program requirements loaded for contract {contract}:")
             logger.debug(f"Base org: {requirements['base_org']}")
@@ -375,7 +386,7 @@ class ExcelRepository:
             logger.debug(f"Dropship orgs: {requirements['dropship_orgs']}")
             
             return requirements
-                
+        
         except Exception as e:
             logger.error(f"Error retrieving program requirements for contract {contract}: {str(e)}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
@@ -383,36 +394,40 @@ class ExcelRepository:
 
     def _process_org_codes(self, org_codes: str) -> List[str]:
         """
-        Process organization codes with full support for different patterns, prefixes, and variations.
+        Procesa códigos de organización con soporte completo para diferentes patrones, prefijos y variaciones.
 
         Args:
-            org_codes: String containing organization codes
+            org_codes: Cadena que contiene códigos de organización
 
         Returns:
-            List[str]: List of validated organization codes
+            List[str]: Lista de códigos de organización validados
         """
         try:
             if pd.isna(org_codes):
                 return []
-                    
-            # Convert to string and clean float values
+                        
+            # Convertir a cadena y limpiar valores flotantes
             org_str = str(org_codes).strip()
             if org_str.endswith('.0'):
                 org_str = org_str[:-2]
-                    
+                        
             if not org_str:
                 return []
             
             normalized_orgs = set()
 
-            # Separar usando palabras clave comunes como "and", "add", "&", "+"  
+            # Separar usando palabras clave comunes como "and", "add", "&", "+"
             add_parts = re.split(r'\s+and\s+add\s+|\s+and\s+|\s*add\s*|\s*&\s*|\s*\+\s*', org_str, flags=re.IGNORECASE)
             
             # Procesar la parte principal (antes de cualquier "and add" o similar)
             main_part = add_parts[0]
-
-            # Extraer números de cualquier prefijo
-            numbers = re.findall(r'\d+', main_part)
+            
+            # Extraer números de cualquier prefijo, priorizando contexto de "org"
+            org_context = re.search(r'(?:org\s+|in\s+org\s+)(\d+(?:[,-]\d+)*)', main_part, re.IGNORECASE)
+            if org_context:
+                numbers = re.findall(r'\d+', org_context.group(1))  # Ej: "04,132,40" -> ["04", "132", "40"]
+            else:
+                numbers = re.findall(r'\d+', main_part)
             for num in numbers:
                 normalized_orgs.add(num.zfill(2))
 
@@ -429,20 +444,26 @@ class ExcelRepository:
 
             # Procesar los números adicionales después de "and add", "and", "add", "&", "+"
             for part in add_parts[1:]:
-                logger.debug(f"Processing additional part: '{part}'")
-                additional_numbers = re.findall(r'\d+', part)
+                logger.debug(f"Procesando parte adicional: '{part}'")
+                org_context = re.search(r'(?:org\s+|in\s+org\s+)(\d+(?:[,-]\d+)*)', part, re.IGNORECASE)
+                if org_context:
+                    additional_numbers = re.findall(r'\d+', org_context.group(1))
+                else:
+                    additional_numbers = re.findall(r'\d+', part)
                 for num in additional_numbers:
-                    normalized_orgs.add(num.zfill(2))
-                    logger.debug(f"Added additional organization: {num.zfill(2)}")
+                    # Evitar agregar números que sean combinación de códigos previos
+                    if not any(num in existing or existing in num for existing in normalized_orgs):
+                        normalized_orgs.add(num.zfill(2))
+                        logger.debug(f"Agregada organización adicional: {num.zfill(2)}")
 
             # Retornar resultados ordenados y únicos
             valid_orgs = sorted(normalized_orgs)
-            logger.debug(f"Processed org codes: Input='{org_codes}' Output={valid_orgs}")
+            logger.debug(f"Códigos de organización procesados: Entrada='{org_codes}' Salida={valid_orgs}")
             return valid_orgs
-                
+                    
         except Exception as e:
-            logger.error(f"Error processing org codes: {str(e)}")
-            logger.error(f"Input value: {org_codes}")
+            logger.error(f"Error al procesar códigos de organización: {str(e)}")
+            logger.error(f"Valor de entrada: {org_codes}")
             return []
             
     @staticmethod
