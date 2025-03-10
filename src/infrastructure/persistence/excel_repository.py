@@ -1,7 +1,8 @@
 import re
 import traceback
 import pandas as pd
-from typing import Dict, List, Optional, Any, Union
+from collections import deque
+from typing import Dict, List, Optional, Any, Union, Generator
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -24,12 +25,17 @@ class ExcelRepository:
     def __init__(
         self, 
         base_path: Optional[Union[str, Path]] = None,
-        config_path: Optional[Union[str, Path]] = None
+        config_path: Optional[Union[str, Path]] = None,
+        batch_size: int = 150000  # Nuevo parámetro
+
     ):
         """Initialize repository with paths."""
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self.config_path = Path(config_path) if config_path else self.base_path
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        max_workers = min(os.cpu_count(), 12)
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.batch_size = batch_size  # Nueva variable de instancia
+
         
         self.inventory_required_columns = InventoryColumns.get_required_columns()
 
@@ -142,7 +148,160 @@ class ExcelRepository:
         except Exception as e:
             logger.error(f"Error checking if file is inventory: {str(e)}")
             return False
-
+        
+    def read_excel_file_in_batches(
+        self, 
+        file_path: Path,
+        is_inventory: bool = False,
+        sheet_name: Optional[str] = None,
+        batch_size: int = 150000,
+        progress_callback=None
+    ) -> Generator[pd.DataFrame, None, None]:
+        """
+        Lee archivo Excel en lotes usando BFS para optimizar memoria.
+        Omite la primera fila (título) y usa la segunda fila como encabezados.
+        
+        Args:
+            file_path: Ruta al archivo Excel
+            is_inventory: Si es un archivo de inventario
+            sheet_name: Nombre de la hoja (opcional)
+            batch_size: Tamaño de cada lote
+            progress_callback: Función de callback para actualizar progreso
+            
+        Returns:
+            Generador que produce DataFrames para cada lote
+        """
+        try:
+            logger.info(f"Reading {'inventory' if is_inventory else 'audit'} file in batches: {file_path}")
+            
+            # Abrir el archivo en modo de solo lectura para optimizar memoria
+            wb = openpyxl.load_workbook(file_path, read_only=True)
+            
+            # Si no se especificó hoja, usar la activa
+            if not sheet_name:
+                ws = wb.active
+            else:
+                # Verificar si existe la hoja solicitada
+                if sheet_name not in wb.sheetnames:
+                    raise ValueError(f"Sheet {sheet_name} not found in {file_path}")
+                ws = wb[sheet_name]
+            
+            # Obtener los encabezados (segunda fila, no la primera)
+            rows_iter = ws.iter_rows()
+            # Saltamos la primera fila (título)
+            next(rows_iter)
+            # Tomamos la segunda fila como encabezados
+            headers_row = next(rows_iter)
+            
+            # Extraer y normalizar encabezados
+            headers = []
+            header_counts = {}  # Para manejar duplicados
+            
+            for cell in headers_row:
+                value = cell.value
+                if value is not None:
+                    header = str(value).strip().replace('\n', '').replace('\r', '').replace('\t', '').replace('  ', ' ').upper()
+                    
+                    # Manejar columnas duplicadas añadiendo un sufijo numérico
+                    if header in header_counts:
+                        header_counts[header] += 1
+                        header = f"{header}_{header_counts[header]}"
+                    else:
+                        header_counts[header] = 0
+                        
+                    headers.append(header)
+                else:
+                    # Asignar un nombre predeterminado para columnas sin nombre
+                    headers.append(f"COL_{len(headers)}")
+                    
+            # Verificar que tenemos encabezados
+            if not headers:
+                raise ValueError("No valid headers found in the Excel file")
+                
+            logger.debug(f"Found {len(headers)} columns: {headers}")
+            
+            # Obtener número total de filas para cálculo de progreso
+            total_rows = ws.max_row - 2  # Restamos 2 por las filas de título y encabezados
+            
+            # Inicializar la cola BFS con el rango inicial (comenzando desde la fila 3)
+            queue = deque([(3, min(batch_size + 3, ws.max_row + 1))])  # (inicio, fin)
+            processed_rows = 0
+            
+            # Procesar lotes usando BFS
+            while queue:
+                start_row, end_row = queue.popleft()
+                
+                # Crear lote actual
+                batch_data = []
+                # Leer rango de filas actual
+                for row in ws.iter_rows(min_row=start_row, max_row=end_row):
+                    row_data = [cell.value for cell in row[:len(headers)]]  # Limitamos al número de encabezados
+                    # Asegurarnos de que el número de elementos coincida con el número de encabezados
+                    while len(row_data) < len(headers):
+                        row_data.append(None)  # Rellenar con None si faltan columnas
+                    batch_data.append(row_data)
+                
+                # Convertir a DataFrame
+                if batch_data:
+                    df_batch = pd.DataFrame(batch_data, columns=headers)
+                    
+                    # Optimizar DataFrame
+                    df_batch = self._optimize_dataframe(df_batch)
+                    
+                    # Actualizar progreso
+                    processed_rows += len(batch_data)
+                    progress = min(1.0, processed_rows / max(1, total_rows))
+                    
+                    if progress_callback:
+                        progress_callback(progress, f"Procesando filas: {processed_rows}/{total_rows}")
+                    
+                    # Retornar el lote procesado
+                    yield df_batch
+                
+                # Agregar siguiente rango a la cola si hay más datos
+                if end_row < ws.max_row:
+                    next_start = end_row + 1
+                    next_end = min(next_start + batch_size - 1, ws.max_row)
+                    if next_start <= next_end:
+                        queue.append((next_start, next_end))
+            
+            # Cerrar el libro
+            wb.close()
+            
+        except Exception as e:
+            logger.error(f"Error reading Excel file in batches: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+        
+    def _optimize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Optimización ligera de DataFrame con manejo seguro de columnas duplicadas"""
+        try:
+            # Conversión de tipos para columnas repetitivas
+            category_columns = [
+                'FULL PART NUMBER', 
+                'ORGANIZATION CODE', 
+                'SERIAL NUMBER CONTROL',
+                'ITEM STATUS'
+            ]
+            
+            for col in category_columns:
+                if col in df.columns:
+                    # Conversión a categoría solo si hay repeticiones
+                    unique_ratio = len(df[col].unique()) / max(len(df), 1)
+                    if unique_ratio < 0.5:  # Solo si menos del 50% son valores únicos
+                        df[col] = df[col].astype('category')
+            
+            # Limpieza segura de columnas de texto
+            for col in df.select_dtypes(include=['object']).columns:
+                if pd.api.types.is_object_dtype(df[col]):
+                    df[col] = df[col].astype(str).str.strip()
+            
+            return df
+        except Exception as e:
+            logger.warning(f"Error optimizing DataFrame: {str(e)}")
+            # Si hay un error, devolver el DataFrame original sin optimizaciones
+            return df
+        
     def read_excel_file(
         self, 
         file_path: Path,
@@ -150,45 +309,45 @@ class ExcelRepository:
         sheet_name: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Read Excel file with consistent handling.
+        Read Excel file with improved header detection.
+        Uses header=1 to skip title row.
+        
+        Args:
+            file_path: Path to the Excel file
+            is_inventory: Whether the file is an inventory file
+            sheet_name: Optional sheet name to read
+            
+        Returns:
+            DataFrame with properly captured column headers
         """
         try:
             logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
             
-            # Configure read options - siempre saltamos la primera fila que es el título
-            options = {
-                'engine': 'openpyxl',
-                'skiprows': 1  # Siempre saltamos la primera fila (título)
-            }
-                
-            # First check if file has multiple sheets
-            xl = pd.ExcelFile(file_path)
-            sheets = xl.sheet_names
+            # Para compatibilidad con el código existente, y corregir el problema
+            # con pd.read_excel, usamos openpyxl directamente para leer el archivo
             
-            # If sheet_name not provided, use first sheet
-            if not sheet_name and len(sheets) > 0:
-                sheet_name = sheets[0]
-                
-            options['sheet_name'] = sheet_name
+            # Configuración para leer todos los lotes
+            all_batches = []
             
-            # Read the file
-            df = pd.read_excel(file_path, **options)
+            for batch_df in self.read_excel_file_in_batches(file_path, is_inventory, sheet_name):
+                all_batches.append(batch_df)
             
-            # If multiple sheets were returned, use the first one
-            if isinstance(df, dict):
-                sheet_name = list(df.keys())[0]
-                df = df[sheet_name]
+            # Combinar todos los lotes en un único DataFrame
+            if all_batches:
+                df = pd.concat(all_batches, ignore_index=True)
+            else:
+                # Si no hay datos, crear un DataFrame vacío
+                df = pd.DataFrame()
             
-            # Normalize columns
-            df = self._normalize_columns(df)
+            # Log para diagnóstico
+            logger.debug(f"Read Excel file successfully: {len(df)} rows, {len(df.columns)} columns")
+            logger.debug(f"Columns: {df.columns.tolist()}")
             
-            # Eliminar columnas sin nombre
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
-                  
             return df
-                
+            
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {str(e)}")
+            logger.error(traceback.format_exc())
             raise
 
     def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:
@@ -204,7 +363,7 @@ class ExcelRepository:
     
     def validate_input_file(self, file_path: Union[str, Path]) -> bool:
         """
-        Validate audit file format and content.
+        Validate audit file format and content with improved diagnostics.
         
         Args:
             file_path: Path to the audit file to validate
@@ -215,10 +374,48 @@ class ExcelRepository:
             # Read and normalize
             df = self.read_excel_file(path)
             
+            # Print diagnostic information
+            logger.info(f"File validation - Found columns ({len(df.columns)}): {df.columns.tolist()}")
+            logger.info(f"File validation - Required columns ({len(self.audit_required_columns)}): {list(self.audit_required_columns.keys())}")
+            
+            # Create column lookup for case-insensitive comparison
+            file_cols_norm = {col.upper().replace(' ', ''): col for col in df.columns}
+            req_cols_norm = {col.upper().replace(' ', ''): col for col in self.audit_required_columns.keys()}
+            
+            # Check for case or format differences
+            true_missing = []
+            for req_key, req_col in req_cols_norm.items():
+                found = False
+                # Try exact match first
+                if req_key in file_cols_norm:
+                    found = True
+                # Try partial match (for cases with extra spaces, underscores, etc)
+                if not found:
+                    for file_key in file_cols_norm:
+                        if req_key in file_key or file_key in req_key:
+                            logger.info(f"Found similar column: Required '{req_col}' matched with '{file_cols_norm[file_key]}'")
+                            found = True
+                            break
+                if not found:
+                    true_missing.append(req_col)
+            
             # Verify required columns
             missing_columns = set(self.audit_required_columns.keys()) - set(df.columns)
             
             if missing_columns:
+                if true_missing:
+                    # If we have true missing columns, provide more specific feedback
+                    logger.error(f"Audit file is missing these critical columns: {true_missing}")
+                    logger.error("These columns cannot be matched even with flexible comparison")
+                else:
+                    # If it's just formatting differences, provide guidance
+                    logger.warning("Columns may exist but with different formatting")
+                    logger.warning("Consider checking for case differences, spacing, or special characters")
+                
+                # Show a sample of the file's actual columns for diagnosis
+                sample_cols = list(df.columns)[:10]
+                logger.info(f"Sample of file columns: {sample_cols}")
+                
                 raise ValueError(f"Audit file missing required columns: {missing_columns}")
             
             return True
