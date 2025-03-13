@@ -790,7 +790,6 @@ class ReportGenerator:
             'Inventory on Hand? Y/N',
             'Inventory Details',
             'NPI Recommendations',
-            'Missing orgs according to Program Requirements',
             'Serial control Owner Action Notes(ISR) *Required',
             'Required Serial control Owner Notes (ISR) *Optional',
             'Optional NPI Action/Data update',
@@ -798,7 +797,8 @@ class ReportGenerator:
             'Procurement/Order Management Team Action Notes *Optional',
             'NPI resolution notes',
             'Status',
-            'Action Required'
+            'Action Required',
+            'Missing orgs according to Program Requirements'
         ]
         columns.extend(remaining_columns)
 
