@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import time
 from datetime import datetime
 from functools import partial
 
@@ -147,11 +148,28 @@ class AuditProcessor:
             
             # Process each audit type - con manejo de errores
             try:
-                serial_results = self._process_serial_control_audit(
-                    audit_df,
-                    program_reqs,
-                    inventory_df
-                )
+                # Intentar usar la versión optimizada primero con manejo de errores
+                logger.info("Attempting to use optimized serial control audit...")
+                start_time = time.time()
+                try:
+                    serial_results = self._process_serial_control_audit_optimized(
+                        audit_df,
+                        program_reqs,
+                        inventory_df
+                    )
+                    elapsed_time = time.time() - start_time
+                    logger.info(f"Optimized serial control audit completed successfully in {elapsed_time:.2f} seconds")
+                except Exception as e:
+                    # Si falla la versión optimizada, usar la versión original como fallback
+                    logger.warning(f"Optimized audit failed: {str(e)}. Falling back to standard implementation.")
+                    fallback_start = time.time()
+                    serial_results = self._process_serial_control_audit(
+                        audit_df,
+                        program_reqs,
+                        inventory_df
+                    )
+                    fallback_time = time.time() - fallback_start
+                    logger.info(f"Standard serial control audit completed in {fallback_time:.2f} seconds")
             except Exception as e:
                 logger.error(f"Error in serial control audit: {e}")
                 raise ValueError(f"Failed to process serial control audit: {e}")
@@ -328,7 +346,317 @@ class AuditProcessor:
         except Exception as e:
             logger.error(f"Error in serial control audit: {str(e)}")
             raise
+        
+        
+    def _create_optimized_data_structures(self, df: pd.DataFrame) -> Dict:
+        """
+        Crea estructuras de datos Hash Map para acceso O(1).
+        Procesa el DataFrame completo una sola vez.
+        """
+        # Estructuras principales
+        parts_by_number = {}  # Acceso por número de parte
+        parts_by_org = {}     # Acceso por organización
+        part_metadata = {}    # Información global de cada parte
+        
+        # Procesamos todas las filas una sola vez - O(n)
+        for _, row in df.iterrows():
+            part_number = row['Part Number']
+            org = str(row['Organization']).strip().zfill(2)  # Normalización 
+            
+            # Almacenar metadata de la parte (solo una vez por parte)
+            if part_number not in part_metadata:
+                part_metadata[part_number] = {
+                    'manufacturer': row.get('Manufacturer', ''),
+                    'description': row.get('Description', ''),
+                    'vertex': row.get('Vertex', ''),
+                    'item_status': row.get('Item Status', '')
+                }
+            
+            # Crear estructura indexada por parte
+            if part_number not in parts_by_number:
+                parts_by_number[part_number] = {}
+            parts_by_number[part_number][org] = {
+                'Serial Control': row.get('Serial Control', ''),
+                'Organization': org,
+                'Status': row.get('Status', ''),
+                # Cualquier otro dato relevante
+            }
+            
+            # Crear estructura indexada por organización
+            if org not in parts_by_org:
+                parts_by_org[org] = {}
+            parts_by_org[org][part_number] = {
+                'Serial Control': row.get('Serial Control', ''),
+                'Status': row.get('Status', '')
+                # Cualquier otro dato relevante
+            }
+        
+        return {
+            'by_part': parts_by_number,
+            'by_org': parts_by_org,
+            'metadata': part_metadata
+        }
+        
+        
+    def _check_serial_control_optimized(
+        self,
+        parts_by_number: Dict,
+        base_org: str,
+        org_destination: List[str]
+    ) -> Dict:
+        """
+        Versión optimizada de _check_serial_control usando Hash Maps.
+        Mantiene exactamente la misma lógica pero con acceso O(1).
+        """
+        mismatched_parts = []
+        comparison_data = []
+        pattern_registry = {}  # Registro de patrones (igual que original)
+        valid_values = ["Dynamic entry at inventory receipt", "No serial number control"]
 
+        print("\n=== SERIAL CONTROL CHECK (OPTIMIZED) ===")
+        print(f"Base org: {base_org}")
+        print(f"Destination orgs: {org_destination}")
+
+        # Ahora procesamos usando el diccionario en vez de filtrar repetidamente
+        for part_number, orgs_data in parts_by_number.items():
+            print(f"\nProcessing part: {part_number}")
+            
+            # Extraer metadata para esta parte
+            part_metadata = {
+                'manufacturer': '',
+                'description': '',
+                'vertex': ''
+            }
+            
+            # Buscar datos en alguna organización para obtener metadata
+            for org_data in orgs_data.values():
+                if 'Manufacturer' in org_data:
+                    part_metadata['manufacturer'] = org_data['Manufacturer']
+                if 'Description' in org_data:
+                    part_metadata['description'] = org_data['Description']
+                if 'Vertex' in org_data:
+                    part_metadata['vertex'] = org_data['Vertex']
+            
+            # Crear diccionario para patrón (igual que original)
+            part_pattern = {
+                'values': {},
+                'part_info': part_metadata
+            }
+
+            # Verificar base org primero
+            base_data = orgs_data.get(base_org, {})
+            base_serial = base_data.get('Serial Control', 'Not found in base org')
+            part_pattern['values']['base'] = base_serial
+
+            # Verificar cada organización destino
+            current_values = set()
+            for org in org_destination:
+                org_data = orgs_data.get(org, {})
+                if org_data:
+                    current_serial = org_data.get('Serial Control', '')
+                    # Normalizar valor (exactamente igual que original)
+                    if str(current_serial).upper() == 'YES':
+                        current_serial = "Dynamic entry at inventory receipt"
+                    elif str(current_serial).upper() == 'NO':
+                        current_serial = "No serial number control"
+                    
+                    part_pattern['values'][org] = current_serial
+                    if current_serial in valid_values:
+                        current_values.add(current_serial)
+                else:
+                    part_pattern['values'][org] = "Not found"
+
+            # Registrar el patrón (igual que original)
+            pattern_key = tuple(sorted(
+                (org, value) for org, value in part_pattern['values'].items()
+            ))
+            if pattern_key not in pattern_registry:
+                pattern_registry[pattern_key] = {
+                    'parts': [],
+                    'count': 0
+                }
+            pattern_registry[pattern_key]['parts'].append({
+                'part_number': part_number,
+                'info': part_metadata
+            })
+            pattern_registry[pattern_key]['count'] += 1
+
+            # Verificar mismatch - EXACTAMENTE MISMA LÓGICA que el original
+            has_mismatch = len(current_values) > 1
+            if has_mismatch:
+                mismatched_parts.append(part_number)
+                
+                # Generar datos de comparación para reporte
+                for org in org_destination:
+                    if org in part_pattern['values']:
+                        comparison_data.append({
+                            'part_number': part_number,
+                            'organization': org,
+                            'serial_control': part_pattern['values'][org],
+                            'base_serial': base_serial,
+                            'has_mismatch': True,
+                            **part_metadata,
+                            'status': 'Mismatch'
+                        })
+
+        # Análisis de patrones sospechosos (igual que original)
+        print("\n=== PATTERN ANALYSIS ===")
+        suspicious_patterns = []
+        for pattern, data in pattern_registry.items():
+            pattern_dict = dict(pattern)
+            
+            # Detectar patrón donde solo una org tiene serial control
+            orgs_with_serial = [
+                org for org, value in pattern_dict.items()
+                if value in valid_values
+            ]
+            
+            if len(orgs_with_serial) == 1:
+                print(f"\n⚠️ Suspicious Pattern Detected:")
+                print(f"Found {data['count']} parts with serial control only in org {orgs_with_serial[0]}")
+                # Más logging igual que el original
+                
+                suspicious_patterns.append({
+                    'pattern': pattern_dict,
+                    'affected_parts': data['parts'],
+                    'count': data['count']
+                })
+
+        return {
+            'mismatched_parts': list(set(mismatched_parts)),
+            'data': comparison_data,
+            'summary': {
+                'total_parts': len(parts_by_number),
+                'total_mismatches': len(set(mismatched_parts)),
+                'suspicious_patterns': suspicious_patterns
+            }
+        }
+        
+        
+    def _process_serial_control_audit_optimized(
+        self,
+        df: pd.DataFrame,
+        program_reqs: Dict,
+        inventory_df: Optional[pd.DataFrame] = None
+    ) -> Dict:
+        """
+        Versión optimizada de auditoría de control serial.
+        """
+        try:
+            # Obtener parámetros clave (igual que original)
+            base_org = program_reqs.get('base_org')
+            org_destination = program_reqs.get('org_destination', [])
+            
+            # Normalización exactamente igual que original
+            if not base_org:
+                base_org = org_destination[0] if org_destination else None
+                logger.warning(f"No base org specified, using first destination org: {base_org}")
+                    
+            if not org_destination:
+                org_strings = [str(org).strip() for org in df['Organization'].unique()]
+                org_destination = sorted(pd.Series(org_strings).str.zfill(2).tolist())
+                logger.warning(f"No destination orgs specified, using all unique orgs: {org_destination}")
+            
+            # Crear estructuras optimizadas (solo una vez)
+            start_time = time.time()
+            logger.info("Building optimized data structures...")
+            data_structures = self._create_optimized_data_structures(df)
+            parts_by_number = data_structures['by_part']
+            
+            build_time = time.time() - start_time
+            logger.info(f"Data structures built in {build_time:.2f} seconds")
+            logger.info(f"Processing {len(parts_by_number)} unique parts with {len(org_destination)} organizations")
+            
+            # Usar versión optimizada para detectar inconsistencias
+            serial_comparison = self._check_serial_control_optimized(
+                parts_by_number, base_org, org_destination
+            )
+            
+            processing_time = time.time() - start_time
+            logger.info(f"Serial comparison completed in {processing_time:.2f} seconds")
+
+            # El resto sigue exactamente igual que el original
+            inventory_check = self._check_inventory_for_mismatches(
+                serial_comparison['mismatched_parts'],
+                df, 
+                org_destination,
+                inventory_df
+            )
+
+            non_hardware = self._validate_non_hardware_parts(df)
+            inventory_summary = inventory_check.get('summary', {})
+
+            inventory_map = {
+                k: v for k, v in inventory_check.items() 
+                if k != 'summary' and isinstance(v, dict)
+            }
+
+            dynamic_columns = {org: f'{org} Serial Control' for org in org_destination}
+
+            results_df = pd.DataFrame([])
+            for part_data in serial_comparison['data']:
+                inventory_key = f"{part_data['part_number']}_{part_data['organization']}"
+                
+                # Resto del procesamiento igual que original
+                inventory_info = inventory_map.get(inventory_key, {})
+                
+                part_result = {
+                    'Part Number': part_data['part_number'],
+                    'Organization': part_data['organization'],
+                    'Serial Control': part_data['serial_control'],
+                    'Base Org Serial Control': part_data['base_serial'],
+                    'Status': 'Mismatch' if part_data['has_mismatch'] else 'OK',
+                    'Action Required': 'Review Serial Control' if part_data['has_mismatch'] else 'None',
+                    'On Hand Quantity': inventory_info.get('quantity', 0),
+                    'has_inventory': inventory_info.get('has_inventory', False),
+                    'Value': inventory_info.get('value', 0.0),
+                    'Subinventory Code': inventory_info.get('subinventory', ''),
+                    'Warehouse Code': inventory_info.get('warehouse_code', ''),
+                    'Aging_0_30': inventory_info.get('aging_0_30', 0.0),
+                    'Aging_31_60': inventory_info.get('aging_31_60', 0.0),
+                    'Aging_61_90': inventory_info.get('aging_61_90', 0.0),
+                    'Is Hardware': 'Yes' if part_data['part_number'] not in non_hardware['non_hardware_parts'] else 'No',
+                    'Manufacturer': part_data.get('manufacturer', ''),
+                    'Description': part_data.get('description', ''),
+                    'Vertex': part_data.get('vertex', '')
+                }
+
+                # Columnas dinámicas igual que original
+                for org, column_name in dynamic_columns.items():
+                    org_serial_control = next(
+                        (data['serial_control'] for data in serial_comparison['data'] 
+                        if data['part_number'] == part_data['part_number'] and 
+                        data['organization'] == org),
+                        'N/A'
+                    )
+                    part_result[column_name] = org_serial_control
+
+                results_df = pd.concat([results_df, pd.DataFrame([part_result])], ignore_index=True)
+
+            # Estructura de retorno exactamente igual que original
+            total_time = time.time() - start_time
+            logger.info(f"Total serial control audit completed in {total_time:.2f} seconds")
+            
+            return {
+                'data': df,
+                'mismatched_parts': serial_comparison['mismatched_parts'],
+                'dynamic_columns': list(dynamic_columns.values()),
+                'inventory_map': inventory_map,
+                'program_requirements': program_reqs,
+                'summary': {
+                    'total_mismatches': len(serial_comparison['mismatched_parts']),
+                    'total_parts': len(df['Part Number'].unique()),
+                    'total_with_inventory': inventory_summary.get('parts_with_inventory', 0),
+                    'total_inventory_records': inventory_summary.get('total_inventory_records', 0),
+                    'total_non_hardware_issues': len(non_hardware['non_hardware_parts'])
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error in optimized serial control audit: {str(e)}")
+            logger.error(traceback.format_exc())
+            raise
+   
     def _check_serial_control(
         self,
         df: pd.DataFrame,
