@@ -205,8 +205,9 @@ class ReportGenerator:
             logger.debug(f"Claves disponibles: {serial_results.keys()}")
             logger.debug(f"Datos: {serial_results.get('data', 'Sin datos')}")
             logger.debug(f"Partes con discrepancias: {serial_results.get('mismatched_parts', 'Sin discrepancias')}")
-
-            excel_path = self.output_dir / f"serial_control_validation_{timestamp}.xlsx"
+            contract_name = program_requirements.get('contract', 'Unknown')
+            contract_name = contract_name.replace(' ', '_')  # Reemplazar espacios por guiones bajos
+            excel_path = self.output_dir / f"serial_control_validation_{contract_name}_{timestamp}.xlsx"
             
             # CORRECCIÓN: Usar la lista exacta de 72 organizaciones físicas proporcionada
             # Estas son las organizaciones que cumplen con DROPSHIP_ENABLED='N' y WMS_ENABLED_FLAG='Y'
@@ -421,7 +422,9 @@ class ReportGenerator:
 
     def _generate_internal_report(self, audit_result: AuditResult, validation_results: Dict, timestamp: str, inventory_validation_enabled: bool = True) -> Path:
         try:
-            excel_path = self.output_dir / f"organization_validation_report_{timestamp}.xlsx"
+            contract_name = validation_results.get('program_requirements', {}).get('contract', 'Unknown')
+            contract_name = contract_name.replace(' ', '_')  # Reemplazar espacios por guiones bajos
+            excel_path = self.output_dir / f"organization_validation_report_{contract_name}_{timestamp}.xlsx"
             org_destination = validation_results.get('program_requirements', {}).get('org_destination', [])
 
             # Convert audit results to base dataframe
@@ -787,6 +790,7 @@ class ReportGenerator:
             'Inventory on Hand? Y/N',
             'Inventory Details',
             'NPI Recommendations',
+            'Missing orgs according to Program Requirements',
             'Serial control Owner Action Notes(ISR) *Required',
             'Required Serial control Owner Notes (ISR) *Optional',
             'Optional NPI Action/Data update',
@@ -954,7 +958,6 @@ class ReportGenerator:
             logger.error(f"Stack trace: {traceback.format_exc()}")
             raise ValueError(f"Failed to convert audit result to DataFrame: {str(e)}")
     
-    
     def _generate_serial_validation_data(self, results: Dict, physical_orgs: List[str], program_requirements: Dict) -> pd.DataFrame:
         """
         Genera el reporte de validación de Serial Control con lógica mejorada.
@@ -1033,6 +1036,9 @@ class ReportGenerator:
 
             # Asegurar que physical_orgs está normalizado
             physical_orgs = [str(org).strip().zfill(2) for org in physical_orgs]
+            org_destination = program_requirements.get('org_destination', [])
+            org_destination = [str(org).strip().zfill(2) for org in org_destination]
+            logger.info(f"Organizaciones destino según requisitos del programa: {org_destination}")
             
             # CORRECCIÓN URGENTE: Identificar las organizaciones presentes en el documento de auditoría
             # y usar solo la intersección con la lista de organizaciones físicas
@@ -1289,8 +1295,35 @@ class ReportGenerator:
 
                 # Determinar si se requiere acción basada en el resultado
                 row['Action Required'] = 'Review Serial Control' if row['Serial Control match?'] == 'Mismatch' else ''
+                
+               # Calcular organizaciones faltantes según la misma lógica de _check_missing_orgs
+                missing_orgs_program = []
+                if org_destination:
+                    # Determinar en qué organizaciones existe esta parte según el DataFrame original
+                    org_exists = set()
+                    if 'Organization' in part_group.columns:
+                        for _, part_row in part_group.iterrows():
+                            org_raw = str(part_row['Organization']).strip()
+                            org = org_raw.zfill(2)
+                            org_exists.add(org)
+                    
+                    # Determinar organizaciones faltantes (las que están en org_destination pero no en org_exists)
+                    missing_orgs_program = [org for org in org_destination if org not in org_exists]
+                    
+                    # Ordenar para consistencia
+                    missing_orgs_program = sorted(missing_orgs_program)
+                    
+                    if missing_orgs_program:
+                        logger.debug(f"Part {part_number}: Missing orgs: {missing_orgs_program}")
 
-                # Mantener campos adicionales existentes - IMPORTANTE: Indentación correcta dentro del bucle
+                # Añadir la información a la fila SIN SOBRESCRIBIR la asignación posterior
+                missing_orgs_str = ','.join(missing_orgs_program) if missing_orgs_program else 'None'
+
+                # Es importante NO modificar el código existente que inicializa el diccionario row
+                # Ya que es crítico para el funcionamiento del resto del método
+                # Solo AÑADIR nuestra información al objeto row que ya existe
+                row['Missing orgs according to Program Requirements'] = missing_orgs_str
+                
                 row.update({
                     'NPI Recommendations': '',
                     'Serial control Owner Notes (ISR) *Required': '',
@@ -1300,6 +1333,7 @@ class ReportGenerator:
                     'Procurement/Order Management Team Action Notes *Optional': '',
                     'NPI resolution notes': '',
                     'Status': 'New',
+                    'Missing orgs according to Program Requirements': row.get('Missing orgs according to Program Requirements', 'None')
                 })
 
                 # 4. Log: Verificar el Item Status justo antes de agregar el row a validation_data
@@ -1446,7 +1480,7 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"Error en generación de datos de validación: {str(e)}")
             raise
-    
+
     def _format_worksheet(self, worksheet) -> None:
         """Format worksheet with basic styling."""
         self._format_worksheet_with_conditional(worksheet, None)

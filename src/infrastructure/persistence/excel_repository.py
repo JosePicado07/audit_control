@@ -142,7 +142,7 @@ class ExcelRepository:
         except Exception as e:
             logger.error(f"Error checking if file is inventory: {str(e)}")
             return False
-
+        
     def read_excel_file(
         self, 
         file_path: Path,
@@ -154,39 +154,39 @@ class ExcelRepository:
         """
         try:
             logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
-            
+
             # Configure read options - siempre saltamos la primera fila que es el título
             options = {
                 'engine': 'openpyxl',
                 'skiprows': 1  # Siempre saltamos la primera fila (título)
             }
-                
+
             # First check if file has multiple sheets
             xl = pd.ExcelFile(file_path)
             sheets = xl.sheet_names
-            
+
             # If sheet_name not provided, use first sheet
             if not sheet_name and len(sheets) > 0:
                 sheet_name = sheets[0]
-                
+
             options['sheet_name'] = sheet_name
-            
+
             # Read the file
             df = pd.read_excel(file_path, **options)
-            
+
             # If multiple sheets were returned, use the first one
             if isinstance(df, dict):
                 sheet_name = list(df.keys())[0]
                 df = df[sheet_name]
-            
+
             # Normalize columns
             df = self._normalize_columns(df)
-            
+
             # Eliminar columnas sin nombre
             df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
-                  
+
             return df
-                
+
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {str(e)}")
             raise
@@ -615,4 +615,4 @@ class ExcelRepository:
                 
         except Exception as e:
             logger.error(f"Error reading inventory file: {str(e)}")
-            raiseNos
+            raise
