@@ -1,0 +1,22 @@
+=== INFORME DETALLADO DE RENDIMIENTO ===
+
+Archivo: C:\Users\picadocj\Desktop\wwt_gah_direct_scheduleable MERCK AUDIT.xlsx
+Contrato: MERCK
+Fecha/Hora: 2025-03-14 17:15:10
+
+RESUMEN GENERAL:
+- Tiempo total (suma de pasos): 136.36 segundos
+- Memoria usada total: 73.93 MB
+
+ANÁLISIS POR PASOS:
+- Lectura del archivo: 62.29s, 62.46 MB
+- Obtener requisitos del programa: 0.44s, 1.12 MB
+- Auditoría de Serial Control: 38.55s, -0.06 MB
+- Auditoría de Organization Mismatch: 34.83s, -0.10 MB
+- Auditoría de otros atributos: 0.10s, 0.00 MB
+- Combinar resultados: 0.15s, 10.34 MB
+
+CUELLO DE BOTELLA PRINCIPAL:
+- Paso más lento: Lectura del archivo (62.29s)
+- Paso con más memoria: Lectura del archivo (62.46 MB)
+

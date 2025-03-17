@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import trace
 import traceback
@@ -9,6 +10,7 @@ import logging
 import time
 from datetime import datetime
 from functools import partial
+import collections
 
 from domain.entities.inventory_entity import InventoryAgingInfo
 from .inventory.inventory_matcher import InventoryMatcher
@@ -175,10 +177,26 @@ class AuditProcessor:
                 raise ValueError(f"Failed to process serial control audit: {e}")
 
             try:
-                org_results = self._process_org_mismatch_audit(
-                    audit_df, 
-                    program_reqs
-                )
+                # Intentar usar la versión optimizada primero con manejo de errores
+                logger.info("Attempting to use optimized organization mismatch audit...")
+                start_time = time.time()
+                try:
+                    org_results = self._process_org_mismatch_audit_optimized(
+                        audit_df, 
+                        program_reqs
+                    )
+                    elapsed_time = time.time() - start_time
+                    logger.info(f"Optimized organization mismatch audit completed successfully in {elapsed_time:.2f} seconds")
+                except Exception as e:
+                    # Si falla la versión optimizada, usar la versión original como fallback
+                    logger.warning(f"Optimized org audit failed: {str(e)}. Falling back to standard implementation.")
+                    fallback_start = time.time()
+                    org_results = self._process_org_mismatch_audit(
+                        audit_df, 
+                        program_reqs
+                    )
+                    fallback_time = time.time() - fallback_start
+                    logger.info(f"Standard organization mismatch audit completed in {fallback_time:.2f} seconds")
             except Exception as e:
                 logger.error(f"Error in org mismatch audit: {e}")
                 raise ValueError(f"Failed to process org mismatch audit: {e}")
@@ -261,7 +279,7 @@ class AuditProcessor:
                 logger.warning(f"No destination orgs specified, using all unique orgs: {org_destination}")
             
             # Obtener resultados de comparación
-            serial_comparison = self._check_serial_control(df, base_org, org_destination)
+            serial_comparison = self._check_serial_control_bfs(df, base_org, org_destination)
 
             # Verificar inventario usando WMS
             inventory_check = self._check_inventory_for_mismatches(
@@ -350,53 +368,223 @@ class AuditProcessor:
         
     def _create_optimized_data_structures(self, df: pd.DataFrame) -> Dict:
         """
-        Crea estructuras de datos Hash Map para acceso O(1).
-        Procesa el DataFrame completo una sola vez.
+        Crea estructuras de datos optimizadas con validación rigurosa.
         """
-        # Estructuras principales
-        parts_by_number = {}  # Acceso por número de parte
-        parts_by_org = {}     # Acceso por organización
-        part_metadata = {}    # Información global de cada parte
+        # Depuración inicial del DataFrame
+        print("\n=== INFORMACIÓN DEL DATAFRAME ===")
+        print(f"Columnas: {df.columns.tolist()}")
+        print(f"Número de filas: {len(df)}")
+        print(f"Dtypes:\n{df.dtypes}")
+
+        # Columnas críticas
+        critical_columns = ['Part Number', 'Organization', 'Serial Control']
         
-        # Procesamos todas las filas una sola vez - O(n)
+        # Verificar columnas
+        missing_columns = [col for col in critical_columns if col not in df.columns]
+        if missing_columns:
+            raise ValueError(f"Faltan columnas críticas: {missing_columns}")
+
+        # Filtrar y limpiar datos
+        df = df[df[critical_columns].notna().all(axis=1)].copy()
+        
+        # Normalizar columnas
+        df['Part Number'] = df['Part Number'].astype(str).str.strip()
+        df['Organization'] = df['Organization'].astype(str).str.strip().str.zfill(2)
+        df['Serial Control'] = df['Serial Control'].astype(str).str.strip()
+
+        # Depuración
+        print(f"\nFilas después del filtrado: {len(df)}")
+
+        # Estructuras de datos
+        parts_by_number = {}
+        part_metadata = {}
+
         for _, row in df.iterrows():
             part_number = row['Part Number']
-            org = str(row['Organization']).strip().zfill(2)  # Normalización 
+            org = row['Organization']
             
-            # Almacenar metadata de la parte (solo una vez por parte)
-            if part_number not in part_metadata:
-                part_metadata[part_number] = {
-                    'manufacturer': row.get('Manufacturer', ''),
-                    'description': row.get('Description', ''),
-                    'vertex': row.get('Vertex', ''),
-                    'item_status': row.get('Item Status', '')
-                }
-            
-            # Crear estructura indexada por parte
+            # Validar entrada
+            if not part_number or not org:
+                continue
+
+            # Inicializar estructuras si no existen
             if part_number not in parts_by_number:
                 parts_by_number[part_number] = {}
+
+            # Metadata de parte (solo una vez por parte)
+            if part_number not in part_metadata:
+                part_metadata[part_number] = {
+                    'manufacturer': str(row.get('Manufacturer', '')).strip(),
+                    'description': str(row.get('Description', '')).strip(),
+                    'vertex': str(row.get('Vertex', '')).strip(),
+                    'item_status': str(row.get('Status', '')).strip()
+                }
+
+            # Crear entrada de organización
             parts_by_number[part_number][org] = {
-                'Serial Control': row.get('Serial Control', ''),
+                'Serial Control': row['Serial Control'],
                 'Organization': org,
-                'Status': row.get('Status', ''),
-                # Cualquier otro dato relevante
+                'Status': str(row.get('Status', '')).strip(),
+                'manufacturer': str(row.get('Manufacturer', '')).strip(),
+                'description': str(row.get('Description', '')).strip(),
+                'vertex': str(row.get('Vertex', '')).strip()
             }
-            
-            # Crear estructura indexada por organización
-            if org not in parts_by_org:
-                parts_by_org[org] = {}
-            parts_by_org[org][part_number] = {
-                'Serial Control': row.get('Serial Control', ''),
-                'Status': row.get('Status', '')
-                # Cualquier otro dato relevante
-            }
-        
+
+        # Depuración final
+        print("\n=== RESUMEN DE ESTRUCTURAS ===")
+        print(f"Número de partes únicas: {len(parts_by_number)}")
+        print(f"Número de metadatos de partes: {len(part_metadata)}")
+
+        # Debug de las primeras estructuras
+        if parts_by_number:
+            first_part = list(parts_by_number.keys())[0]
+            print(f"\nEstructura de la primera parte ({first_part}):")
+            print(json.dumps(parts_by_number[first_part], indent=2))
+
         return {
             'by_part': parts_by_number,
-            'by_org': parts_by_org,
             'metadata': part_metadata
         }
         
+        
+    def _normalize_serial_value(self, value: str) -> str:
+        """
+        Normaliza los valores de Serial Control para comparaciones consistentes.
+        
+        Args:
+            value: Valor de Serial Control a normalizar
+            
+        Returns:
+            Valor normalizado para comparación
+        """
+        # Manejo de valores nulos o vacíos
+        if value is None or pd.isna(value):
+            return "Not found in org"
+            
+        # Normalización básica
+        value_upper = str(value).strip().upper()
+        
+        # Mapping de valores comunes
+        if value_upper in {"YES", "Y", "TRUE", "1", "DYNAMIC ENTRY AT INVENTORY RECEIPT", 
+                    "DYNAMIC ENTRY", "DYNAMIC"}:
+            return "Dynamic entry at inventory receipt"
+            
+        elif value_upper in {"NO", "N", "FALSE", "0", "NONE", "NO SERIAL NUMBER CONTROL", 
+                    "NO SERIAL CONTROL", "NO SERIAL"}:
+            return "No serial number control"
+            
+        elif "NOT FOUND" in value_upper or value_upper == "NOT FOUND IN ORG":
+            return "Not found in org"
+            
+        # Retornar el valor original si no coincide con ningún patrón
+        return value
+        
+    def _check_serial_control_bfs(
+        self,
+        parts_by_number: Dict,
+        base_org: str,
+        org_destination: List[str]
+    ) -> Dict:
+        start_time = time.time()
+        
+        base_org = str(base_org).strip().zfill(2)
+        org_destination = [str(org).strip().zfill(2) for org in org_destination]
+        
+        mismatched_parts = []
+        comparison_data = []
+        processed_count = 0
+        
+        for part_number, orgs_data in parts_by_number.items():
+            # AÑADIR VALIDACIÓN DE TIPO
+            if not isinstance(orgs_data, dict):
+                logger.warning(f"Skipping part {part_number} due to invalid orgs_data type: {type(orgs_data)}")
+                continue
+            
+            valid_values = {"Dynamic entry at inventory receipt", "No serial number control"}
+            org_serial_map = {}
+            
+            # Base serial con validación adicional
+            base_serial = "Not found in base org"
+            if base_org in orgs_data and isinstance(orgs_data[base_org], dict):
+                base_serial = self._normalize_serial_value(orgs_data[base_org].get('Serial Control', 'Not found'))
+            
+            queue = collections.deque(orgs_data.keys())
+            visited = set()
+            unique_serials = set()
+            
+            while queue:
+                current_org = queue.popleft()
+                if current_org in visited:
+                    continue
+                    
+                visited.add(current_org)
+                
+                # AÑADIR VALIDACIÓN DE ESTRUCTURA
+                if (current_org in orgs_data and 
+                    isinstance(orgs_data[current_org], dict)):
+                    serial_value = self._normalize_serial_value(
+                        orgs_data[current_org].get('Serial Control', 'Not found')
+                    )
+                    org_serial_map[current_org] = serial_value
+                    
+                    if serial_value in valid_values:
+                        unique_serials.add(serial_value)
+                
+                # No necesitamos encolar vecinos, ya estamos procesando todas las orgs
+            
+            # Determinar si hay mismatch (>1 valor único válido)
+            has_mismatch = len(unique_serials) > 1
+            
+            if has_mismatch:
+                mismatched_parts.append(part_number)
+                
+                # Crear datos de comparación para cada organización
+                for org in org_destination:
+                    if org in orgs_data:
+                        # Usar datos del nodo para información de la parte
+                        part_info = {
+                            'manufacturer': orgs_data.get(org, {}).get('manufacturer', ''),
+                            'description': orgs_data.get(org, {}).get('description', ''),
+                            'vertex': orgs_data.get(org, {}).get('vertex', '')
+                        }
+                        
+                        # Si no hay info en esta org, buscar en cualquier otra
+                        if not any(part_info.values()):
+                            for any_org in orgs_data:
+                                if any(orgs_data.get(any_org, {}).get(field, '') for field in ['manufacturer', 'description', 'vertex']):
+                                    part_info = {
+                                        'manufacturer': orgs_data.get(any_org, {}).get('manufacturer', ''),
+                                        'description': orgs_data.get(any_org, {}).get('description', ''),
+                                        'vertex': orgs_data.get(any_org, {}).get('vertex', '')
+                                    }
+                                    break
+                        
+                        comparison_data.append({
+                            'part_number': part_number,
+                            'organization': org,
+                            'serial_control': org_serial_map.get(org, 'Not found'),
+                            'base_serial': base_serial,
+                            'has_mismatch': True,
+                            **part_info,
+                            'status': 'Mismatch'
+                        })
+            
+            processed_count += 1
+            if processed_count % 1000 == 0:
+                logger.info(f"Processed {processed_count}/{len(parts_by_number)} parts using BFS")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Serial control check with BFS completed in {elapsed:.2f}s")
+        
+        return {
+            'mismatched_parts': mismatched_parts,
+            'data': comparison_data,
+            'summary': {
+                'total_parts': len(parts_by_number),
+                'total_mismatches': len(mismatched_parts),
+                'processing_time': elapsed
+            }
+        }
         
     def _check_serial_control_optimized(
         self,
@@ -568,7 +756,7 @@ class AuditProcessor:
             logger.info(f"Processing {len(parts_by_number)} unique parts with {len(org_destination)} organizations")
             
             # Usar versión optimizada para detectar inconsistencias
-            serial_comparison = self._check_serial_control_optimized(
+            serial_comparison = self._check_serial_control_bfs(
                 parts_by_number, base_org, org_destination
             )
             
@@ -984,6 +1172,92 @@ class AuditProcessor:
             logger.error(f"Error checking vertex consistency: {str(e)}")
             raise
 
+    def _process_org_mismatch_audit_optimized(
+        self, 
+        df: pd.DataFrame, 
+        program_reqs: Dict
+    ) -> Dict:
+        """
+        Versión optimizada del proceso de auditoría de organizaciones.
+        """
+        try:
+            start_time = time.time()
+            logger.info("Starting optimized organization mismatch audit...")
+
+            # Obtener organizaciones de destino
+            org_destination = program_reqs.get('org_destination', [])
+            
+            # Usar la estructura de datos existente de optimización
+            data_structures = self._create_optimized_data_structures(df)
+            parts_by_number = data_structures['by_part']
+            part_metadata = data_structures['metadata']
+
+            # Estructuras para resultados optimizados
+            result = {
+                'data': [],
+                'ftp_upload': {'data': [], 'filename': ''},
+                'summary': {'total_missing_orgs': 0, 'total_vertex_issues': 0}
+            }
+
+            # Procesamiento optimizado
+            for part_number, part_data in parts_by_number.items():
+                # Obtener metadatos de la parte
+                metadata = part_metadata.get(part_number, {})
+                
+                # Organizaciones presentes
+                current_orgs = list(part_data.keys())
+                
+                # Identificar organizaciones faltantes
+                missing_orgs = sorted(set(
+                    str(org).strip().zfill(2) for org in org_destination
+                ) - set(current_orgs))
+
+                # Procesamiento de organizaciones actuales
+                for org in current_orgs:
+                    status = part_data[org].get('Status', 'Active')
+                    result['data'].append({
+                        'Part Number': part_number,
+                        'Organization': org,
+                        'Status': status,
+                        'Action Required': 'None' if status == 'Active' else f'Check status in Org {org}',
+                        'Vertex': metadata.get('vertex', ''),
+                        'Description': metadata.get('description', ''),
+                        'Current Orgs': ', '.join(sorted(current_orgs)),
+                        'Missing Orgs': ', '.join(sorted(missing_orgs))
+                    })
+
+                # Procesamiento de organizaciones faltantes
+                for org in missing_orgs:
+                    result['data'].append({
+                        'Part Number': part_number,
+                        'Organization': org,
+                        'Status': 'Missing in Org',
+                        'Action Required': f"Create in Org {org}",
+                        'Vertex': metadata.get('vertex', ''),
+                        'Description': metadata.get('description', ''),
+                        'Current Orgs': ', '.join(sorted(current_orgs)),
+                        'Missing Orgs': ', '.join(sorted(missing_orgs))
+                    })
+
+            # Convertir lista a DataFrame para mantener compatibilidad
+            result['data'] = pd.DataFrame(result['data'])
+
+            # Vertex consistency check
+            vertex_issues = self._check_vertex_consistency(df)
+            result['summary'].update({
+                'total_missing_orgs': len(result['data'][result['data']['Status'] == 'Missing in Org']),
+                'total_vertex_issues': len(vertex_issues.get('issues', []))
+            })
+
+            processing_time = time.time() - start_time
+            logger.info(f"Optimized org mismatch audit completed in {processing_time:.2f} seconds")
+            
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in optimized org mismatch audit: {str(e)}")
+            raise
+
     
     def _process_org_mismatch_audit(self, df: pd.DataFrame, program_reqs: Dict) -> Dict:
         """Process Organization Mismatch Audit"""
@@ -1102,6 +1376,75 @@ class AuditProcessor:
                         
         except Exception as e:
             print(f"Error in _check_missing_orgs: {str(e)}")
+            raise
+        
+        
+    def _check_missing_orgs_optimized(self, df: pd.DataFrame, org_destination: List[str]) -> Dict:
+        """
+        Versión optimizada de verificación de organizaciones faltantes.
+        Usa estructuras hash para procesamiento eficiente.
+        """
+        try:
+            start_time = time.time()
+            logger.info("Starting optimized missing organizations check...")
+
+            # Crear estructuras de datos optimizadas
+            data_structures = self._create_optimized_data_structures(df)
+            parts_by_number = data_structures['by_part']
+            part_metadata = data_structures['metadata']
+
+            # Normalizar organizaciones de destino
+            normalized_org_dest = sorted([str(org).strip().zfill(2) for org in org_destination])
+            
+            missing_items = []
+            total_missing = 0
+
+            # Procesamiento directo usando estructuras hash
+            for part_number, part_data in parts_by_number.items():
+                # Obtener organizaciones actuales
+                current_orgs = list(part_data.keys())
+                
+                # Calcular organizaciones faltantes
+                missing_orgs = sorted(set(normalized_org_dest) - set(current_orgs))
+                
+                # Obtener metadatos de la parte
+                metadata = part_metadata.get(part_number, {})
+                
+                # Solo agregar si hay organizaciones faltantes o actuales
+                if missing_orgs or current_orgs:
+                    # Crear mapeo de estados de organización
+                    org_status = {org: part_data[org].get('Status', 'Active') for org in current_orgs}
+                    
+                    missing_items.append({
+                        'part_number': part_number,
+                        'missing_orgs': missing_orgs,
+                        'current_orgs': current_orgs,
+                        'org_status': org_status,
+                        'vertex_class': metadata.get('vertex', ''),
+                        'description': metadata.get('description', '')
+                    })
+                    total_missing += 1
+
+            # Preparar resultado
+            result = {
+                'missing_items': missing_items,
+                'total_missing': total_missing
+            }
+
+            # Logging para debugging (similar al método original)
+            for item in missing_items[:3]:
+                logger.info(f"Part {item['part_number']}:")
+                logger.info(f"  Missing orgs: {item['missing_orgs']}")
+                logger.info(f"  Current orgs with status: {item['org_status']}")
+                logger.info(f"  Actually present in: {item['current_orgs']}")
+
+            processing_time = time.time() - start_time
+            logger.info(f"Optimized missing organizations check completed in {processing_time:.2f} seconds")
+            
+            return result
+                            
+        except Exception as e:
+            logger.error(f"Error in optimized _check_missing_orgs: {str(e)}")
             raise
     
     def _prepare_ftp_upload_data(

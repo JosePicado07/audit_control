@@ -1,0 +1,11 @@
+=== INFORME DETALLADO DE RENDIMIENTO ===
+
+Archivo: C:\Users\picadocj\Desktop\wwt_gah_direct_scheduleable MERCK AUDIT.xlsx
+Contrato: MERCK
+
+RESUMEN:
+- Tiempo total: 539.22 segundos
+- Uso de CPU: 79.8%
+- Memoria usada: 0.00 MB
+
+ESTADÍSTICAS DETALLADAS:
