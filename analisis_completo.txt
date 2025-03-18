@@ -1,0 +1,43 @@
+================================================================================
+INFORME DETALLADO DE RENDIMIENTO - 2025-03-17 22:29:08
+================================================================================
+Duración total: 0.4979 segundos
+Memoria inicial: 85.96 MB
+Memoria final: 89.77 MB
+Incremento total de memoria: 3.80 MB
+Total de pasos analizados: 2
+
+ANÁLISIS COMPLETO DE PASOS (ORDENADOS POR DURACIÓN)
+--------------------------------------------------------------------------------
+#   Paso                           Duración (s) % Total  Memoria (MB)
+--------------------------------------------------------------------------------
+1   analisis_excel                 0.4749       95.38    3.79        
+    - Llamado desde: main (d:\Desktop - Copy\Trabajo\Audit\audit_control\run_profiler.py:52)
+
+2   read_excel_test_1              0.3062       61.51    3.53        
+    - method: read_excel_test
+    - args_count: 0
+    - kwargs_keys: []
+    - module: __main__
+    - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
+
+
+ANÁLISIS POR MÉTODO
+--------------------------------------------------------------------------------
+Método                                   Llamadas Tiempo Total (s) % Total  Memoria (MB)
+--------------------------------------------------------------------------------
+read_excel_test                          1        0.3062           61.51    3.53        
+
+PASOS CON MAYOR CONSUMO DE MEMORIA
+--------------------------------------------------------------------------------
+#   Paso                           Memoria (MB) Duración (s)
+--------------------------------------------------------------------------------
+1   analisis_excel                 3.79         0.4749      
+2   read_excel_test_1              3.53         0.3062      
+    - Método: read_excel_test
+
+RECOMENDACIONES DE OPTIMIZACIÓN
+--------------------------------------------------------------------------------
+Métodos críticos que consumen más del 10% del tiempo total:
+  - read_excel_test: 0.31s total, 0.31s promedio por llamada
+    Recomendación: Optimizar implementación o reducir número de llamadas

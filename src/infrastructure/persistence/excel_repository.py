@@ -13,6 +13,9 @@ from functools import lru_cache
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
 import warnings
+import numpy as np  # Para optimización de tipos de datos
+from functools import lru_cache  # Para caché eficiente
+import psutil  # Para monitoreo de memoria
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -24,13 +27,19 @@ class ExcelRepository:
     def __init__(
         self, 
         base_path: Optional[Union[str, Path]] = None,
-        config_path: Optional[Union[str, Path]] = None
+        config_path: Optional[Union[str, Path]] = None,
+        
     ):
         """Initialize repository with paths."""
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self.config_path = Path(config_path) if config_path else self.base_path
         self.executor = ThreadPoolExecutor(max_workers=4)
+        self._excel_cache = lru_cache(maxsize=10)(self.read_excel_file)
+
         
+        self._dataframe_cache = {}
+        self._file_modification_times = {}
+          
         self.inventory_required_columns = InventoryColumns.get_required_columns()
 
         
@@ -147,49 +156,92 @@ class ExcelRepository:
         self, 
         file_path: Path,
         is_inventory: bool = False,
-        sheet_name: Optional[str] = None
+        sheet_name: Optional[str] = None,
+        use_cache: bool = True,
+        chunk_size: int = 10000,  # Nuevo parámetro para procesamiento por chunks
+        memory_limit: float = 0.7  # Límite de memoria (70% de RAM disponible)
     ) -> pd.DataFrame:
-        """
-        Read Excel file with consistent handling.
-        """
         try:
-            logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
+            # Verificar límite de memoria disponible
+            available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)  # GB
+            max_memory = available_memory * memory_limit
+            
+            logger.debug(f"Memoria disponible: {available_memory:.2f} GB, Límite: {max_memory:.2f} GB")
 
-            # Configure read options - siempre saltamos la primera fila que es el título
+            # Leer archivo con opciones optimizadas
             options = {
                 'engine': 'openpyxl',
-                'skiprows': 1  # Siempre saltamos la primera fila (título)
+                'skiprows': 1,
+                'dtype': self._infer_dtypes(file_path),  # Nuevo método para inferir tipos
+                'parse_dates': True,  # Parsear fechas automáticamente
+                'low_memory': True  # Habilitar procesamiento de bajo consumo de memoria
             }
 
-            # First check if file has multiple sheets
-            xl = pd.ExcelFile(file_path)
-            sheets = xl.sheet_names
-
-            # If sheet_name not provided, use first sheet
-            if not sheet_name and len(sheets) > 0:
-                sheet_name = sheets[0]
-
-            options['sheet_name'] = sheet_name
-
-            # Read the file
-            df = pd.read_excel(file_path, **options)
-
-            # If multiple sheets were returned, use the first one
-            if isinstance(df, dict):
-                sheet_name = list(df.keys())[0]
-                df = df[sheet_name]
-
-            # Normalize columns
-            df = self._normalize_columns(df)
-
-            # Eliminar columnas sin nombre
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
+            # Si el archivo es muy grande, usar procesamiento por chunks
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # Tamaño en MB
+            
+            if file_size > 50:  # Umbral para procesamiento por chunks
+                logger.info(f"Archivo grande detectado ({file_size:.2f} MB). Procesando por chunks.")
+                chunks = []
+                for chunk in pd.read_excel(file_path, chunksize=chunk_size, **options):
+                    chunk = self._process_chunk(chunk, is_inventory)
+                    chunks.append(chunk)
+                
+                df = pd.concat(chunks, ignore_index=True)
+            else:
+                # Lectura de archivo pequeño
+                df = pd.read_excel(file_path, **options)
+                df = self._process_chunk(df, is_inventory)
 
             return df
 
+        except MemoryError:
+            logger.error("Memoria insuficiente para procesar el archivo")
+            raise MemoryError("El archivo es demasiado grande para procesarse con la memoria disponible")
+
+    def _infer_dtypes(self, file_path: Path) -> Dict:
+        """Inferir tipos de datos de manera eficiente"""
+        try:
+            # Leer solo primeras 1000 filas para inferir tipos
+            sample_df = pd.read_excel(file_path, nrows=1000)
+            
+            dtype_mapping = {}
+            for col in sample_df.columns:
+                if sample_df[col].dtype == 'object':
+                    # Si es texto, intentar convertir a categoría si pocos valores únicos
+                    unique_count = sample_df[col].nunique()
+                    if unique_count < len(sample_df) * 0.5:
+                        dtype_mapping[col] = 'category'
+                    else:
+                        dtype_mapping[col] = str
+                elif pd.api.types.is_numeric_dtype(sample_df[col]):
+                    # Reducir precisión de números flotantes
+                    dtype_mapping[col] = np.float32
+                elif pd.api.types.is_datetime64_any_dtype(sample_df[col]):
+                    dtype_mapping[col] = 'datetime64[ns]'
+            
+            return dtype_mapping
         except Exception as e:
-            logger.error(f"Error reading Excel file {file_path}: {str(e)}")
-            raise
+            logger.warning(f"Error infiriendo tipos de datos: {e}")
+            return {}
+
+    def _process_chunk(self, chunk: pd.DataFrame, is_inventory: bool = False) -> pd.DataFrame:
+        """Procesar chunk con normalización y limpieza"""
+        # Normalizar columnas
+        chunk.columns = chunk.columns.str.strip().str.upper()
+        
+        # Eliminar columnas sin nombre
+        chunk = chunk.loc[:, ~chunk.columns.str.contains('^UNNAMED:', na=False)]
+        
+        # Convertir columnas a tipos más eficientes
+        for col in chunk.columns:
+            if chunk[col].dtype == 'object':
+                # Convertir a categoría si pocas categorías únicas
+                unique_count = chunk[col].nunique()
+                if unique_count < len(chunk) * 0.5:
+                    chunk[col] = chunk[col].astype('category')
+        
+        return chunk
 
     def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:
         """Validate basic file requirements."""
@@ -212,8 +264,11 @@ class ExcelRepository:
         try:
             path = self._validate_file_basics(file_path)
             
-            # Read and normalize
-            df = self.read_excel_file(path)
+            # Read and normalize con opción de no usar caché para validación
+            df = self.read_excel_file(path, use_cache=False)
+            
+            if df is None or df.empty:
+                raise ValueError("File read returned empty or None DataFrame")
             
             # Verify required columns
             missing_columns = set(self.audit_required_columns.keys()) - set(df.columns)
@@ -225,7 +280,7 @@ class ExcelRepository:
             
         except Exception as e:
             logger.error(f"File validation error: {str(e)}")
-            raise
+        raise
 
     def validate_inventory_file(self, file_path: Union[str, Path]) -> bool:
         """
@@ -586,6 +641,29 @@ class ExcelRepository:
             raise FileNotFoundError(error_msg)
         
         return default_path
+    
+    def clear_cache(self, file_path: Optional[Union[str, Path]] = None) -> None:
+        """
+        Limpiar la caché de DataFrames.
+        
+        Args:
+            file_path: Si se proporciona, solo limpia la caché para ese archivo.
+                    Si es None, limpia toda la caché.
+        """
+        try:
+            if file_path is None:
+                logger.debug("Clearing all DataFrame caches")
+                self._dataframe_cache.clear()
+                self._file_modification_times.clear()
+            else:
+                file_path_str = str(file_path)
+                keys_to_remove = [k for k in self._dataframe_cache if k.startswith(file_path_str)]
+                for key in keys_to_remove:
+                    logger.debug(f"Removing cache for {key}")
+                    self._dataframe_cache.pop(key, None)
+                self._file_modification_times.pop(file_path_str, None)
+        except Exception as e:
+            logger.error(f"Error clearing cache: {str(e)}")
 
     def cleanup(self) -> None:
         """Clean up repository resources."""
@@ -593,6 +671,9 @@ class ExcelRepository:
             if hasattr(self, 'executor'):
                 logger.debug("Shutting down executor...")
                 self.executor.shutdown(wait=True)
+            # Limpiar caché
+            if hasattr(self, '_dataframe_cache'):
+                self.clear_cache()
         except Exception as e:
             logger.error(f"Error during cleanup: {str(e)}")
 
