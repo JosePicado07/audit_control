@@ -158,65 +158,119 @@ class ExcelRepository:
         is_inventory: bool = False,
         sheet_name: Optional[str] = None,
         use_cache: bool = True,
-        chunk_size: int = 10000,  # Nuevo parámetro para procesamiento por chunks
-        memory_limit: float = 0.7  # Límite de memoria (70% de RAM disponible)
+        chunk_size: int = 5000,  # Reducir tamaño de chunk para menor consumo de memoria
+        memory_threshold: float = 50  # Umbral de tamaño de archivo en MB
     ) -> pd.DataFrame:
         try:
-            # Verificar límite de memoria disponible
-            available_memory = psutil.virtual_memory().available / (1024 * 1024 * 1024)  # GB
-            max_memory = available_memory * memory_limit
-            
-            logger.debug(f"Memoria disponible: {available_memory:.2f} GB, Límite: {max_memory:.2f} GB")
+            # Verificación inicial de tamaño de archivo
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # Tamaño en MB
+            logger.info(f"Procesando archivo de {file_size:.2f} MB")
 
-            # Leer archivo con opciones optimizadas
+            # Estrategia de lectura basada en tamaño
+            if file_size > memory_threshold:
+                logger.info("Utilizando estrategia de lectura por chunks para archivo grande")
+                return self._read_large_file(file_path, is_inventory, sheet_name, chunk_size)
+            else:
+                return self._read_small_file(file_path, is_inventory, sheet_name)
+
+        except Exception as e:
+            logger.error(f"Error procesando archivo {file_path}: {e}")
+            raise
+
+    def _read_large_file(
+        self, 
+        file_path: Path, 
+        is_inventory: bool, 
+        sheet_name: Optional[str], 
+        chunk_size: int
+    ) -> pd.DataFrame:
+        """Estrategia de lectura para archivos grandes con menor consumo de memoria"""
+        try:
+            # Opciones de lectura optimizadas
             options = {
                 'engine': 'openpyxl',
                 'skiprows': 1,
-                'dtype': self._infer_dtypes(file_path),  # Nuevo método para inferir tipos
-                'parse_dates': True,  # Parsear fechas automáticamente
-                'low_memory': True  # Habilitar procesamiento de bajo consumo de memoria
+                'dtype': self._infer_dtypes(file_path),
+                'parse_dates': False  # Desactivar parsing de fechas para reducir memoria
             }
-
-            # Si el archivo es muy grande, usar procesamiento por chunks
-            file_size = os.path.getsize(file_path) / (1024 * 1024)  # Tamaño en MB
             
-            if file_size > 50:  # Umbral para procesamiento por chunks
-                logger.info(f"Archivo grande detectado ({file_size:.2f} MB). Procesando por chunks.")
-                chunks = []
+            # Generador para procesar chunks
+            def chunk_generator():
                 for chunk in pd.read_excel(file_path, chunksize=chunk_size, **options):
-                    chunk = self._process_chunk(chunk, is_inventory)
-                    chunks.append(chunk)
-                
-                df = pd.concat(chunks, ignore_index=True)
-            else:
-                # Lectura de archivo pequeño
-                df = pd.read_excel(file_path, **options)
-                df = self._process_chunk(df, is_inventory)
+                    yield self._process_chunk(chunk, is_inventory)
 
+            # Concatenación con menos memoria
+            df = pd.concat(chunk_generator(), ignore_index=True)
+            
             return df
 
-        except MemoryError:
-            logger.error("Memoria insuficiente para procesar el archivo")
-            raise MemoryError("El archivo es demasiado grande para procesarse con la memoria disponible")
+        except Exception as e:
+            logger.error(f"Error procesando archivo grande: {e}")
+            raise
+
+    def _read_small_file(
+        self, 
+        file_path: Path, 
+        is_inventory: bool, 
+        sheet_name: Optional[str]
+    ) -> pd.DataFrame:
+        """Estrategia de lectura para archivos pequeños"""
+        try:
+            # Opciones de lectura simples
+            options = {
+                'engine': 'openpyxl',
+                'skiprows': 1
+            }
+            
+            # Leer archivo
+            df = pd.read_excel(file_path, **options)
+            
+            # Procesar chunk
+            return self._process_chunk(df, is_inventory)
+
+        except Exception as e:
+            logger.error(f"Error procesando archivo pequeño: {e}")
+            raise
+
+    def _process_chunk(self, chunk: pd.DataFrame, is_inventory: bool = False) -> pd.DataFrame:
+        """Procesamiento de chunk con optimización de memoria"""
+        # Normalizar columnas
+        chunk.columns = chunk.columns.str.strip().str.upper()
+        
+        # Eliminar columnas sin nombre
+        chunk = chunk.loc[:, ~chunk.columns.str.contains('^UNNAMED:', na=False)]
+        
+        # Conversión de tipos más agresiva
+        for col in chunk.columns:
+            if chunk[col].dtype == 'object':
+                # Convertir a categoría solo si hay pocos valores únicos
+                unique_ratio = chunk[col].nunique() / len(chunk)
+                if unique_ratio < 0.1:  # Cambiar umbral para categoricals
+                    chunk[col] = chunk[col].astype('category')
+                else:
+                    # Para columnas con muchos valores únicos, usar string compacto
+                    chunk[col] = chunk[col].astype('string')
+        
+        return chunk
 
     def _infer_dtypes(self, file_path: Path) -> Dict:
-        """Inferir tipos de datos de manera eficiente"""
+        """Inferir tipos de datos de manera más ligera"""
         try:
-            # Leer solo primeras 1000 filas para inferir tipos
-            sample_df = pd.read_excel(file_path, nrows=1000)
+            # Leer menos filas para inferir tipos
+            sample_df = pd.read_excel(file_path, nrows=500)  # Reducir muestra
             
             dtype_mapping = {}
             for col in sample_df.columns:
                 if sample_df[col].dtype == 'object':
-                    # Si es texto, intentar convertir a categoría si pocos valores únicos
-                    unique_count = sample_df[col].nunique()
-                    if unique_count < len(sample_df) * 0.5:
+                    # Umbral más estricto para categoricals
+                    unique_ratio = sample_df[col].nunique() / len(sample_df)
+                    if unique_ratio < 0.1:
                         dtype_mapping[col] = 'category'
                     else:
-                        dtype_mapping[col] = str
+                        dtype_mapping[col] = 'string'
                 elif pd.api.types.is_numeric_dtype(sample_df[col]):
-                    # Reducir precisión de números flotantes
-                    dtype_mapping[col] = np.float32
+                    # Usar tipos más compactos
+                    dtype_mapping[col] = np.float16  # Aún más compacto
                 elif pd.api.types.is_datetime64_any_dtype(sample_df[col]):
                     dtype_mapping[col] = 'datetime64[ns]'
             
@@ -224,24 +278,6 @@ class ExcelRepository:
         except Exception as e:
             logger.warning(f"Error infiriendo tipos de datos: {e}")
             return {}
-
-    def _process_chunk(self, chunk: pd.DataFrame, is_inventory: bool = False) -> pd.DataFrame:
-        """Procesar chunk con normalización y limpieza"""
-        # Normalizar columnas
-        chunk.columns = chunk.columns.str.strip().str.upper()
-        
-        # Eliminar columnas sin nombre
-        chunk = chunk.loc[:, ~chunk.columns.str.contains('^UNNAMED:', na=False)]
-        
-        # Convertir columnas a tipos más eficientes
-        for col in chunk.columns:
-            if chunk[col].dtype == 'object':
-                # Convertir a categoría si pocas categorías únicas
-                unique_count = chunk[col].nunique()
-                if unique_count < len(chunk) * 0.5:
-                    chunk[col] = chunk[col].astype('category')
-        
-        return chunk
 
     def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:
         """Validate basic file requirements."""
@@ -280,7 +316,7 @@ class ExcelRepository:
             
         except Exception as e:
             logger.error(f"File validation error: {str(e)}")
-        raise
+            return False
 
     def validate_inventory_file(self, file_path: Union[str, Path]) -> bool:
         """
