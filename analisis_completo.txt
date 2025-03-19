@@ -1,20 +1,20 @@
 ================================================================================
-INFORME DETALLADO DE RENDIMIENTO - 2025-03-17 23:03:15
+INFORME DETALLADO DE RENDIMIENTO - 2025-03-18 22:15:36
 ================================================================================
-Duración total: 411.5592 segundos
-Memoria inicial: 86.28 MB
-Memoria final: 155.71 MB
-Incremento total de memoria: 69.43 MB
+Duración total: 255.2640 segundos
+Memoria inicial: 85.28 MB
+Memoria final: 158.24 MB
+Incremento total de memoria: 72.96 MB
 Total de pasos analizados: 10
 
 ANÁLISIS COMPLETO DE PASOS (ORDENADOS POR DURACIÓN)
 --------------------------------------------------------------------------------
 #   Paso                           Duración (s) % Total  Memoria (MB)
 --------------------------------------------------------------------------------
-1   auditoria_completa             382.3848     92.91    60.62       
+1   auditoria_completa             226.2470     88.63    63.56       
     - Llamado desde: main (d:\Desktop - Copy\Trabajo\Audit\audit_control\run_profiler.py:124)
 
-2   AuditController.execute_audit_1 382.3483     92.90    74.87       
+2   AuditController.execute_audit_1 226.2049     88.62    75.81       
     - method: AuditController.execute_audit
     - args_count: 3
     - kwargs_keys: []
@@ -22,10 +22,10 @@ ANÁLISIS COMPLETO DE PASOS (ORDENADOS POR DURACIÓN)
     - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
     - Resultado: dict
 
-3   analisis_excel                 28.9891      7.04     21.50       
+3   analisis_excel                 28.8341      11.30    22.70       
     - Llamado desde: main (d:\Desktop - Copy\Trabajo\Audit\audit_control\run_profiler.py:52)
 
-4   read_excel_test_1              28.8217      7.00     21.25       
+4   read_excel_test_1              28.6686      11.23    22.40       
     - method: read_excel_test
     - args_count: 0
     - kwargs_keys: []
@@ -33,13 +33,21 @@ ANÁLISIS COMPLETO DE PASOS (ORDENADOS POR DURACIÓN)
     - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
     - Resultado: DataFrame con forma (146625, 35)
 
-5   inicializacion_componentes     0.0782       0.02     0.13        
+5   inicializacion_componentes     0.0794       0.03     0.00        
     - Llamado desde: main (d:\Desktop - Copy\Trabajo\Audit\audit_control\run_profiler.py:95)
 
-6   analisis_dataframe             0.0111       0.00     0.02        
+6   analisis_dataframe             0.0110       0.00     0.02        
     - Llamado desde: main (d:\Desktop - Copy\Trabajo\Audit\audit_control\run_profiler.py:74)
 
-7   report_generator.ReportGenerator_1 0.0010       0.00     0.00        
+7   audit_service.AuditService_1   0.0010       0.00     0.00        
+    - method: audit_service.AuditService
+    - args_count: 0
+    - kwargs_keys: ['audit_processor', 'report_generator', 'excel_repository']
+    - module: src.application.services.audit_service
+    - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
+    - Resultado: AuditService
+
+8   report_generator.ReportGenerator_1 0.0010       0.00     0.00        
     - method: report_generator.ReportGenerator
     - args_count: 0
     - kwargs_keys: []
@@ -47,21 +55,13 @@ ANÁLISIS COMPLETO DE PASOS (ORDENADOS POR DURACIÓN)
     - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
     - Resultado: ReportGenerator
 
-8   audit_processor.AuditProcessor_1 0.0010       0.00     0.00        
+9   audit_processor.AuditProcessor_1 0.0000       0.00     0.00        
     - method: audit_processor.AuditProcessor
     - args_count: 0
     - kwargs_keys: ['repository']
     - module: src.application.use_cases.audit_processor
     - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
     - Resultado: AuditProcessor
-
-9   audit_service.AuditService_1   0.0000       0.00     0.00        
-    - method: audit_service.AuditService
-    - args_count: 0
-    - kwargs_keys: ['audit_processor', 'report_generator', 'excel_repository']
-    - module: src.application.services.audit_service
-    - Llamado desde: profile_method (d:\Desktop - Copy\Trabajo\Audit\audit_control\profiler_audit.py:164)
-    - Resultado: AuditService
 
 10  audit_controller.AuditController_1 0.0000       0.00     0.00        
     - method: audit_controller.AuditController
@@ -76,27 +76,29 @@ ANÁLISIS POR MÉTODO
 --------------------------------------------------------------------------------
 Método                                   Llamadas Tiempo Total (s) % Total  Memoria (MB)
 --------------------------------------------------------------------------------
-AuditController.execute_audit            1        382.3483         92.90    74.87       
-read_excel_test                          1        28.8217          7.00     21.25       
+AuditController.execute_audit            1        226.2049         88.62    75.81       
+read_excel_test                          1        28.6686          11.23    22.40       
+audit_service.AuditService               1        0.0010           0.00     0.00        
 report_generator.ReportGenerator         1        0.0010           0.00     0.00        
-audit_processor.AuditProcessor           1        0.0010           0.00     0.00        
-audit_service.AuditService               1        0.0000           0.00     0.00        
+audit_processor.AuditProcessor           1        0.0000           0.00     0.00        
 audit_controller.AuditController         1        0.0000           0.00     0.00        
 
 PASOS CON MAYOR CONSUMO DE MEMORIA
 --------------------------------------------------------------------------------
 #   Paso                           Memoria (MB) Duración (s)
 --------------------------------------------------------------------------------
-1   AuditController.execute_audit_1 74.87        382.3483    
+1   AuditController.execute_audit_1 75.81        226.2049    
     - Método: AuditController.execute_audit
-2   auditoria_completa             60.62        382.3848    
-3   analisis_excel                 21.50        28.9891     
-4   read_excel_test_1              21.25        28.8217     
+2   auditoria_completa             63.56        226.2470    
+3   analisis_excel                 22.70        28.8341     
+4   read_excel_test_1              22.40        28.6686     
     - Método: read_excel_test
-5   inicializacion_componentes     0.13         0.0782      
+5   analisis_dataframe             0.02         0.0110      
 
 RECOMENDACIONES DE OPTIMIZACIÓN
 --------------------------------------------------------------------------------
 Métodos críticos que consumen más del 10% del tiempo total:
-  - AuditController.execute_audit: 382.35s total, 382.35s promedio por llamada
+  - AuditController.execute_audit: 226.20s total, 226.20s promedio por llamada
+    Recomendación: Optimizar implementación o reducir número de llamadas
+  - read_excel_test: 28.67s total, 28.67s promedio por llamada
     Recomendación: Optimizar implementación o reducir número de llamadas

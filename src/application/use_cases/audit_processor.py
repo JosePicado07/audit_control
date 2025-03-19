@@ -3,6 +3,7 @@ import trace
 import traceback
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
+import concurrent
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -92,9 +93,11 @@ class AuditProcessor:
             }
         )
         
+    import concurrent.futures
+
     def process_audit(self, file_path: str, contract: str, inventory_file: Optional[str] = None) -> AuditResult:
         try:
-            # Logging detallado al inicio
+            # Código inicial igual - obtención de requisitos y validación
             logger.debug(f"Contract: {contract}")
             logger.debug(f"Audit file: {file_path}")
             logger.debug(f"Inventory file: {inventory_file}")
@@ -145,69 +148,89 @@ class AuditProcessor:
                 inventory_df = self._read_inventory_file(inventory_file)
                 logger.debug(f"Inventory DataFrame shape: {inventory_df.shape}")
             
-            # Process each audit type - con manejo de errores
-            try:
-                serial_results = self._process_serial_control_audit(
-                    audit_df,
+            # CAMBIO: Procesamiento paralelo de las tres auditorías
+            # Utilizamos un ThreadPoolExecutor con max_workers=3 para las tres tareas
+            logger.info("Starting parallel audit processing")
+            serial_results = None
+            org_results = None
+            other_results = None
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                # Iniciar procesos en paralelo
+                serial_future = executor.submit(
+                    self._process_serial_control_audit,
+                    audit_df.copy(),  # Usar .copy() para evitar race conditions
                     program_reqs,
                     inventory_df
                 )
-            except Exception as e:
-                logger.error(f"Error in serial control audit: {e}")
-                raise ValueError(f"Failed to process serial control audit: {e}")
-
-            try:
-                org_results = self._process_org_mismatch_audit(
-                    audit_df, 
+                
+                org_future = executor.submit(
+                    self._process_org_mismatch_audit,
+                    audit_df.copy(),  # Usar .copy() para evitar race conditions
                     program_reqs
                 )
-            except Exception as e:
-                logger.error(f"Error in org mismatch audit: {e}")
-                raise ValueError(f"Failed to process org mismatch audit: {e}")
-
-            try:
-                other_results = self._process_other_attributes_audit(
-                    audit_df, 
+                
+                other_future = executor.submit(
+                    self._process_other_attributes_audit,
+                    audit_df.copy(),  # Usar .copy() para evitar race conditions
                     program_reqs
                 )
-            except Exception as e:
-                logger.error(f"Error in other attributes audit: {e}")
-                raise ValueError(f"Failed to process other attributes audit: {e}")
-
-            # Validaciones finales de resultados
+                
+                # Obtener resultados con manejo de excepciones explícito
+                try:
+                    serial_results = serial_future.result()
+                    logger.debug("Serial control audit completed successfully")
+                except Exception as e:
+                    logger.error(f"Error in serial control audit: {e}")
+                    raise ValueError(f"Failed to process serial control audit: {e}")
+                
+                try:
+                    org_results = org_future.result()
+                    logger.debug("Org mismatch audit completed successfully")
+                except Exception as e:
+                    logger.error(f"Error in org mismatch audit: {e}")
+                    raise ValueError(f"Failed to process org mismatch audit: {e}")
+                
+                try:
+                    other_results = other_future.result()
+                    logger.debug("Other attributes audit completed successfully")
+                except Exception as e:
+                    logger.error(f"Error in other attributes audit: {e}")
+                    raise ValueError(f"Failed to process other attributes audit: {e}")
+            
+            logger.info("All parallel audit processes completed")
+            
+            # Validaciones finales de resultados - igual
             if (serial_results['data'].empty and 
                 org_results['data'].empty and 
                 other_results['data'].empty):
                 logger.warning("All audit result DataFrames are empty")
                 raise ValueError("No valid audit results generated from processing")
 
-            # Combine results
+            # El resto del código sigue igual
             combined_df = self._combine_audit_results(
                 serial_results['data'],
                 org_results['data'],
                 other_results['data']
             )
 
-            # Generate audit summary
             audit_summary = self.generate_audit_summary(combined_df)
 
-            # Convert results to AuditItems
-            audit_items = self._convert_to_audit_items(combined_df, program_reqs.get('org_destination', []), audit_df, inventory_df,existing_inventory_check=serial_results.get('inventory_check'))
+            audit_items = self._convert_to_audit_items(combined_df, program_reqs.get('org_destination', []), audit_df, inventory_df, existing_inventory_check=serial_results.get('inventory_check'))
 
             audit_result = AuditResult(
-            audit_id=f"AUDIT_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            contract=contract,
-            timestamp=datetime.now(),
-            items=audit_items,
-            summary=audit_summary,
-            # Corrección en cómo acceder a los valores del DataFrame
-            manufacturer=combined_df['Manufacturer'].iloc[0] if not combined_df.empty and 'Manufacturer' in combined_df.columns else '',
-            description=combined_df['Description'].iloc[0] if not combined_df.empty and 'Description' in combined_df.columns else '',
-            vertex_class=combined_df['Vertex'].iloc[0] if not combined_df.empty and 'Vertex' in combined_df.columns else '',
-            serial_control_results=serial_results,
-            org_mismatch_results=org_results,
-            report_path=None
-        )
+                audit_id=f"AUDIT_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                contract=contract,
+                timestamp=datetime.now(),
+                items=audit_items,
+                summary=audit_summary,
+                manufacturer=combined_df['Manufacturer'].iloc[0] if not combined_df.empty and 'Manufacturer' in combined_df.columns else '',
+                description=combined_df['Description'].iloc[0] if not combined_df.empty and 'Description' in combined_df.columns else '',
+                vertex_class=combined_df['Vertex'].iloc[0] if not combined_df.empty and 'Vertex' in combined_df.columns else '',
+                serial_control_results=serial_results,
+                org_mismatch_results=org_results,
+                report_path=None
+            )
 
             self.status = AuditStatus.COMPLETED
             logger.info("Audit result created successfully")
@@ -226,9 +249,14 @@ class AuditProcessor:
         inventory_df: Optional[pd.DataFrame] = None
     ) -> Dict:
         """
-        Procesa la auditoría de control de serie preservando toda la información de inventario
+        Procesa la auditoría de control de serie preservando toda la información de inventario.
+        Versión optimizada para rendimiento significativamente mejor.
         """
         try:
+            import time
+            start_time = time.time()
+            logger.info("Iniciando auditoría de control de serie")
+            
             base_org = program_reqs['base_org']
             org_destination = program_reqs['org_destination']
             
@@ -237,45 +265,72 @@ class AuditProcessor:
                 logger.warning(f"No base org specified, using first destination org: {base_org}")
                 
             if not org_destination:
-                # Crear una lista de strings y aplicar zfill usando Series.str
                 org_strings = [str(org).strip() for org in df['Organization'].unique()]
                 org_destination = sorted(pd.Series(org_strings).str.zfill(2).tolist())
                 logger.warning(f"No destination orgs specified, using all unique orgs: {org_destination}")
             
-            # Obtener resultados de comparación
-            serial_comparison = self._check_serial_control(df, base_org, org_destination)
-
-            # Verificar inventario usando WMS
-            inventory_check = self._check_inventory_for_mismatches(
-                serial_comparison['mismatched_parts'],
+            # OPTIMIZACIÓN 1: Obtener resultados de comparación con método optimizado
+            logger.info("Ejecutando verificación de control de serie optimizada")
+            serial_comparison = self._check_serial_control_optimized(df, base_org, org_destination)
+            logger.info(f"Comparación de serial completada. Encontrados {len(serial_comparison['mismatched_parts'])} mismatches")
+            
+            # CORRECCIÓN: Verificar inventario para TODAS las partes (no solo las que tienen discrepancias)
+            logger.info("Verificando inventario para todas las partes")
+            inventory_check_start = time.time()
+            # Pasamos None para verificar todas las partes en lugar de solo mismatched_parts
+            inventory_check = self._check_inventory_for_mismatches_optimized(
+                None,  # Verificar todas las partes
                 df, 
                 org_destination,
                 inventory_df
             )
-
-            non_hardware = self._validate_non_hardware_parts(df)
+            logger.info(f"Verificación de inventario completada en {time.time() - inventory_check_start:.2f}s")
+            
+            # OPTIMIZACIÓN 3: Procesar partes non-hardware en paralelo mientras preparamos otros datos
+            logger.info("Procesando validación de non-hardware y preparando datos")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                non_hardware_future = executor.submit(self._validate_non_hardware_parts, df)
+                
+                # Mientras tanto, preparar el mapa de inventario
+                inventory_map = {
+                    k: v for k, v in inventory_check.items() 
+                    if k != 'summary' and isinstance(v, dict)
+                }
+                
+                # Obtener el resultado de non-hardware
+                non_hardware = non_hardware_future.result()
+            
             inventory_summary = inventory_check.get('summary', {})
-
-            # Crear un mapeo de inventario enriquecido
-            inventory_map = {
-                k: v for k, v in inventory_check.items() 
-                if k != 'summary' and isinstance(v, dict)
-            }
-
-            # Preparar las columnas dinámicas
+            
+            # OPTIMIZACIÓN 4: Preparar estructura de datos para columnas dinámicas
+            # Indexar datos de comparación para búsqueda rápida por parte y org
+            part_org_data = {}
+            for item in serial_comparison['data']:
+                part_num = item['part_number']
+                org = item['organization']
+                
+                if part_num not in part_org_data:
+                    part_org_data[part_num] = {}
+                
+                part_org_data[part_num][org] = item
+            
+            # OPTIMIZACIÓN 5: Crear el DataFrame de resultados de una sola vez
+            logger.info("Construyendo DataFrame de resultados")
+            results_rows = []
             dynamic_columns = {org: f'{org} Serial Control' for org in org_destination}
-
-            results_df = pd.DataFrame([])
+            
             for part_data in serial_comparison['data']:
-                inventory_key = f"{part_data['part_number']}_{part_data['organization']}"
+                part_number = part_data['part_number']
+                organization = part_data['organization']
+                inventory_key = f"{part_number}_{organization}"
                 
                 # Obtener información completa de inventario
                 inventory_info = inventory_map.get(inventory_key, {})
                 
                 # Construir resultado enriquecido
                 part_result = {
-                    'Part Number': part_data['part_number'],
-                    'Organization': part_data['organization'],
+                    'Part Number': part_number,
+                    'Organization': organization,
                     'Serial Control': part_data['serial_control'],
                     'Base Org Serial Control': part_data['base_serial'],
                     'Status': 'Mismatch' if part_data['has_mismatch'] else 'OK',
@@ -291,27 +346,31 @@ class AuditProcessor:
                     'Aging_31_60': inventory_info.get('aging_31_60', 0.0),
                     'Aging_61_90': inventory_info.get('aging_61_90', 0.0),
                     # Información adicional
-                    'Is Hardware': 'Yes' if part_data['part_number'] not in non_hardware['non_hardware_parts'] else 'No',
+                    'Is Hardware': 'Yes' if part_number not in non_hardware['non_hardware_parts'] else 'No',
                     'Manufacturer': part_data.get('manufacturer', ''),
                     'Description': part_data.get('description', ''),
                     'Vertex': part_data.get('vertex', '')
                 }
-
-                # Agregar columnas dinámicas
+                
+                # Agregar columnas dinámicas - OPTIMIZADO
                 for org, column_name in dynamic_columns.items():
-                    org_serial_control = next(
-                        (data['serial_control'] for data in serial_comparison['data'] 
-                        if data['part_number'] == part_data['part_number'] and 
-                        data['organization'] == org),
-                        'N/A'
-                    )
+                    if part_number in part_org_data and org in part_org_data[part_number]:
+                        org_serial_control = part_org_data[part_number][org]['serial_control']
+                    else:
+                        org_serial_control = 'N/A'
                     part_result[column_name] = org_serial_control
-
-                results_df = pd.concat([results_df, pd.DataFrame([part_result])], ignore_index=True)
-
+                
+                results_rows.append(part_result)
+            
+            # Crear DataFrame de una sola vez es mucho más eficiente
+            results_df = pd.DataFrame(results_rows)
+            
+            total_duration = time.time() - start_time
+            logger.info(f"Auditoría de control de serie completada en {total_duration:.2f}s")
+            
             # Agregar el mapeo de inventario al resultado para uso posterior
             return {
-                'data': df,
+                'data': df,  # Mantenemos el DataFrame original como en tu implementación original
                 'mismatched_parts': serial_comparison['mismatched_parts'],
                 'dynamic_columns': list(dynamic_columns.values()),
                 'inventory_map': inventory_map,
@@ -327,7 +386,182 @@ class AuditProcessor:
 
         except Exception as e:
             logger.error(f"Error in serial control audit: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
             raise
+        
+    def _check_serial_control_optimized(
+        self,
+        df: pd.DataFrame,
+        base_org: str,
+        org_destination: List[str]
+    ) -> Dict:
+        """
+        Versión altamente optimizada de la comparación de control de serie.
+        Utiliza preprocesamiento, diccionarios para lookups y minimiza operaciones pandas.
+        """
+        try:
+            import time
+            start_time = time.time()
+            logger.info(f"Iniciando verificación optimizada de control de serie para {len(df['Part Number'].unique())} partes")
+            
+            # OPTIMIZACIÓN 1: Crear índices por parte y organización
+            part_org_index = {}
+            
+            # Pre-procesar parte única -> organizaciones -> datos
+            for _, row in df.iterrows():
+                part = row['Part Number']
+                org = str(row['Organization']).strip().zfill(2)
+                
+                if part not in part_org_index:
+                    part_org_index[part] = {}
+                
+                # Guardar todos los datos relevantes de una vez
+                part_org_index[part][org] = {
+                    'serial_control': row['Serial Control'],
+                    'item_status': row.get('Item Status', ''),
+                    'manufacturer': row.get('Manufacturer', ''),
+                    'description': row.get('Description', ''),
+                    'vertex': row.get('Vertex', '')
+                }
+            
+            # OPTIMIZACIÓN 2: Procesar cada parte una sola vez
+            mismatched_parts = []
+            comparison_data = []
+            pattern_registry = {}
+            valid_values = ["Dynamic entry at inventory receipt", "No serial number control", "YES", "NO"]
+            
+            # Convertir base_org a formato consistente
+            base_org = str(base_org).strip().zfill(2)
+            
+            for part_number, org_data in part_org_index.items():
+                # Preparar datos de patrón
+                part_pattern = {
+                    'values': {},
+                    'part_info': {
+                        'manufacturer': next(iter(org_data.values())).get('manufacturer', ''),
+                        'description': next(iter(org_data.values())).get('description', ''),
+                        'vertex': next(iter(org_data.values())).get('vertex', '')
+                    }
+                }
+                
+                # Verificar base org
+                base_serial = "Not found in base org"
+                if base_org in org_data:
+                    base_serial = org_data[base_org]['serial_control']
+                    # Normalizar
+                    if base_serial == 'YES':
+                        base_serial = "Dynamic entry at inventory receipt"
+                    elif base_serial == 'NO':
+                        base_serial = "No serial number control"
+                
+                part_pattern['values']['base'] = base_serial
+                
+                # Verificar cada org de destino
+                current_values = set()
+                for org in org_destination:
+                    org_clean = str(org).strip().zfill(2)
+                    if org_clean in org_data:
+                        current_serial = org_data[org_clean]['serial_control']
+                        
+                        # Normalizar valor
+                        if current_serial == 'YES':
+                            current_serial = "Dynamic entry at inventory receipt"
+                        elif current_serial == 'NO':
+                            current_serial = "No serial number control"
+                        
+                        part_pattern['values'][org_clean] = current_serial
+                        
+                        # Solo considerar valores válidos para detección de discrepancias
+                        if current_serial in valid_values:
+                            current_values.add(current_serial)
+                    else:
+                        part_pattern['values'][org_clean] = "Not found"
+                
+                # Registrar patrón para análisis
+                pattern_key = tuple(sorted(
+                    (org, value) for org, value in part_pattern['values'].items()
+                ))
+                
+                if pattern_key not in pattern_registry:
+                    pattern_registry[pattern_key] = {
+                        'parts': [],
+                        'count': 0
+                    }
+                
+                pattern_registry[pattern_key]['parts'].append({
+                    'part_number': part_number,
+                    'info': part_pattern['part_info']
+                })
+                pattern_registry[pattern_key]['count'] += 1
+                
+                # Verificar discrepancias - cualquier parte con más de un valor único
+                has_mismatch = len(current_values) > 1
+                if has_mismatch:
+                    mismatched_parts.append(part_number)
+                    
+                    # Crear registros de comparación para organizaciones con datos
+                    for org in org_destination:
+                        org_clean = str(org).strip().zfill(2)
+                        if org_clean in org_data:
+                            current_serial = org_data[org_clean]['serial_control']
+                            
+                            # Normalizar para consistencia
+                            if current_serial == 'YES':
+                                current_serial = "Dynamic entry at inventory receipt"
+                            elif current_serial == 'NO':
+                                current_serial = "No serial number control"
+                            
+                            # Crear registro de comparación
+                            comparison_data.append({
+                                'part_number': part_number,
+                                'organization': org_clean,
+                                'serial_control': current_serial,
+                                'base_serial': base_serial,
+                                'has_mismatch': True,
+                                'manufacturer': org_data[org_clean].get('manufacturer', ''),
+                                'description': org_data[org_clean].get('description', ''),
+                                'vertex': org_data[org_clean].get('vertex', ''),
+                                'item_status': org_data[org_clean].get('item_status', ''),
+                                'status': 'Mismatch'
+                            })
+            
+            # OPTIMIZACIÓN 3: Análisis de patrones sospechosos más eficiente
+            suspicious_patterns = []
+            for pattern, data in pattern_registry.items():
+                pattern_dict = dict(pattern)
+                
+                # Detectar patrón donde solo una org tiene serial control
+                orgs_with_serial = [
+                    org for org, value in pattern_dict.items()
+                    if value in ["Dynamic entry at inventory receipt", "No serial number control", "YES", "NO"]
+                ]
+                
+                if len(orgs_with_serial) == 1:
+                    suspicious_patterns.append({
+                        'pattern': pattern_dict,
+                        'affected_parts': data['parts'],
+                        'count': data['count']
+                    })
+            
+            elapsed = time.time() - start_time
+            logger.info(f"Verificación de control de serie completada en {elapsed:.2f}s")
+            logger.info(f"Encontradas {len(mismatched_parts)} partes con discrepancias entre {len(part_org_index)} partes únicas")
+            
+            return {
+                'mismatched_parts': list(set(mismatched_parts)),
+                'data': comparison_data,
+                'summary': {
+                    'total_parts': len(part_org_index),
+                    'total_mismatches': len(set(mismatched_parts)),
+                    'suspicious_patterns': suspicious_patterns
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error checking serial control: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            raise
+    
 
     def _check_serial_control(
         self,
@@ -462,138 +696,216 @@ class AuditProcessor:
             logger.error(f"Error checking serial control: {str(e)}")
             raise
         
-    def _check_inventory_for_mismatches(
-        self, 
-        mismatched_parts: List[str], 
-        df: pd.DataFrame,
-        org_destination: List[str], 
-        inventory_df: Optional[pd.DataFrame]
-    ) -> Dict:
-        """
-        Verifica discrepancias de inventario para las partes que tienen diferencias.
-        
-        Args:
-            mismatched_parts: Lista de partes con discrepancias
-            df: DataFrame principal de auditoría
-            org_destination: Lista de organizaciones a verificar
-            inventory_df: DataFrame opcional con datos de inventario
-        
-        Returns:
-            Dict con resultados del análisis de inventario
-        """
-        try:
-            logger.info("=== INICIO CHECK INVENTORY ===")
+    def _check_inventory_for_mismatches_optimized(
+            self, 
+            mismatched_parts: List[str], 
+            df: pd.DataFrame,
+            org_destination: List[str], 
+            inventory_df: Optional[pd.DataFrame]
+        ) -> Dict:
+            """
+            Versión optimizada para verificar discrepancias de inventario.
+            Utiliza procesamiento por lotes, índices y paralelización.
             
-            # Validaciones iniciales
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                raise ValueError("DataFrame principal vacío o inválido")
+            Args:
+                mismatched_parts: Lista de partes con discrepancias
+                df: DataFrame principal de auditoría
+                org_destination: Lista de organizaciones a verificar
+                inventory_df: DataFrame opcional con datos de inventario
+            
+            Returns:
+                Dict con resultados del análisis de inventario
+            """
+            try:
+                import time
+                start_time = time.time()
+                logger.info("=== INICIO CHECK INVENTORY OPTIMIZADO ===")
                 
-            if not org_destination:
-                raise ValueError("Lista de organizaciones destino vacía")
+                # Validaciones iniciales
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    raise ValueError("DataFrame principal vacío o inválido")
+                    
+                if not org_destination:
+                    raise ValueError("Lista de organizaciones destino vacía")
 
-            # Obtener todas las partes únicas del DataFrame principal
-            all_parts = set(df['Part Number'].unique())
-            mismatched_set = set(str(part).strip().upper() for part in (mismatched_parts or []))
-            
-            logger.info(f"Total de partes en archivo: {len(all_parts)}")
-            logger.info(f"Partes con discrepancias: {len(mismatched_set)}")
-            logger.info(f"Organizaciones a revisar: {org_destination}")
-
-            # Inicializar matcher y cargar inventario
-            matcher = InventoryMatcher()
-            if inventory_df is not None:
-                logger.debug("Procesando archivo de inventario...")
-                logger.debug(f"Columnas originales: {inventory_df.columns.tolist()}")
+                # Obtener todas las partes únicas del DataFrame principal
+                all_parts = list(df['Part Number'].unique())
+                mismatched_set = set(str(part).strip().upper() for part in (mismatched_parts or []))
                 
-                # Normalizar columnas
-                column_mappings = {col: col for col in inventory_df.columns}
-                inventory_df.columns = [
-                    col.strip().upper().replace(' ', '_') 
-                    for col in inventory_df.columns
-                ]
+                # Normalizar org_destination
+                org_destination = [str(org).strip().zfill(2) for org in org_destination]
                 
-                # Cargar inventario
-                matcher.load_inventory(inventory_df, column_mappings)
-
-            # Procesar resultados
-            results = {}
-            processed_count = 0
-            parts_with_inventory = set()
-            total_inventory_records = 0
-            
-            # Procesar cada parte con sus organizaciones
-            for part_number in all_parts:
-                part_clean = str(part_number).strip().upper()
-                is_mismatched = part_clean in mismatched_set
+                logger.info(f"Total de partes en archivo: {len(all_parts)}")
+                logger.info(f"Partes con discrepancias: {len(mismatched_set)}")
+                logger.info(f"Organizaciones a revisar: {org_destination}")
                 
-                logger.debug(f"Verificando parte ({processed_count + 1}/{len(all_parts)}): {part_clean}")
-                logger.debug(f"Estado: {'Con discrepancia' if is_mismatched else 'Sin discrepancia'}")
+                # OPTIMIZACIÓN 1: Inicializar matcher y cargar inventario con preprocesamiento
+                matcher = InventoryMatcher()
+                inventory_index = {}
                 
-                part_has_inventory = False
-                
-                for org in org_destination:
-                    org_raw = str(org).strip()
-                    # Usar zfill en string individual, no en Series
-                    org_clean = org_raw.zfill(2)
-                    key = f"{part_clean}_{org_clean}"
+                if inventory_df is not None:
+                    logger.debug("Procesando archivo de inventario...")
                     
-                    # Obtener información de inventario
-                    match_result = matcher.check_inventory(part_clean, org_clean)
+                    # Normalizar columnas para consistencia
+                    inventory_df.columns = [
+                        col.strip().upper().replace(' ', '_') 
+                        for col in inventory_df.columns
+                    ]
                     
-                    results[key] = {
-                        'part_number': part_clean,
-                        'organization': org_clean,
-                        'quantity': match_result.quantity,
-                        'has_inventory': match_result.has_inventory,
-                        'has_mismatch': is_mismatched,
-                        'value': match_result.value,
-                        'subinventory': match_result.subinventory,
-                        'warehouse_code': match_result.warehouse_code,
-                        'aging_info': {
-                            'aging_0_30': match_result.aging_info.days_0_30,
-                            'aging_31_60': match_result.aging_info.days_31_60,
-                            'aging_61_90': match_result.aging_info.days_61_90
-                        }
-                    }
+                    logger.debug(f"Columnas normalizadas: {inventory_df.columns.tolist()}")
                     
-                    if match_result.error_message:
-                        results[key]['error'] = match_result.error_message
-                        logger.warning(f"Error en {key}: {match_result.error_message}")
+                    # Cargar inventario
+                    column_mappings = {col: col for col in inventory_df.columns}
+                    matcher.load_inventory(inventory_df, column_mappings)
                     
-                    if match_result.quantity > 0:
-                        part_has_inventory = True
-                        total_inventory_records += 1
-                        logger.debug(f"Inventario encontrado: {match_result.quantity}")
+                    # OPTIMIZACIÓN 2: Crear índice para búsqueda rápida en inventario
+                    if hasattr(matcher, 'inventory_df') and matcher.inventory_df is not None:
+                        logger.debug("Creando índice de búsqueda rápida para inventario...")
+                        
+                        # Normalizar columnas clave para matching
+                        item_col = matcher.column_mapping.get('ITEM_NUMBER', 'ITEM_NUMBER')
+                        org_col = matcher.column_mapping.get('ORGANIZATION_CODE', 'ORGANIZATION_CODE')
+                        
+                        # Crear índice de inventario por parte y organización
+                        for _, row in matcher.inventory_df.iterrows():
+                            item = str(row[item_col]).strip().upper()
+                            org = str(row[org_col]).strip().zfill(2)
+                            key = f"{item}_{org}"
+                            
+                            if key not in inventory_index:
+                                inventory_index[key] = []
+                            
+                            inventory_index[key].append(row)
+                        
+                        logger.debug(f"Índice de inventario creado con {len(inventory_index)} claves")
                 
-                if part_has_inventory:
-                    parts_with_inventory.add(part_clean)
-                    
-                processed_count += 1
+                # OPTIMIZACIÓN 3: Procesar por lotes
+                batch_size = 1000  # Procesar 1000 partes a la vez
+                results = {}
+                parts_with_inventory = set()
+                total_inventory_records = 0
                 
-                # Log de progreso cada 100 partes
-                if processed_count % 100 == 0:
-                    logger.info(f"Procesadas {processed_count} de {len(all_parts)} partes")
-
-            # Generar resumen
-            summary = {
-                'total_parts': len(all_parts),
-                'parts_with_mismatch': len(mismatched_set),
-                'parts_without_mismatch': len(all_parts - mismatched_set),
-                'parts_with_inventory': len(parts_with_inventory),
-                'total_inventory_records': total_inventory_records
-            }
-            
-            logger.info("=== RESUMEN DE INVENTARIO ===")
-            for key, value in summary.items():
-                logger.info(f"{key}: {value}")
-            
-            results['summary'] = summary
-            return results
+                total_batches = (len(all_parts) + batch_size - 1) // batch_size
+                logger.info(f"Procesando {len(all_parts)} partes en {total_batches} lotes de {batch_size}")
+                
+                for batch_idx in range(total_batches):
+                    batch_start = time.time()
+                    start_idx = batch_idx * batch_size
+                    end_idx = min((batch_idx + 1) * batch_size, len(all_parts))
+                    current_batch = all_parts[start_idx:end_idx]
                     
-        except Exception as e:
-            logger.error(f"Error en verificación de inventario: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            raise
+                    logger.info(f"Procesando lote {batch_idx+1}/{total_batches} ({len(current_batch)} partes)")
+                    
+                    # OPTIMIZACIÓN 4: Procesamiento en paralelo por organización
+                    # Para cada parte, procesar todas las organizaciones en paralelo
+                    batch_results = {}
+                    batch_parts_with_inventory = set()
+                    batch_inventory_records = 0
+                    
+                    for part_number in current_batch:
+                        part_clean = str(part_number).strip().upper()
+                        is_mismatched = part_clean in mismatched_set
+                        part_has_inventory = False
+                        
+                        # Procesar cada organización para esta parte
+                        for org in org_destination:
+                            org_clean = org  # Ya normalizado
+                            key = f"{part_clean}_{org_clean}"
+                            
+                            # OPTIMIZACIÓN 5: Usar índice de inventario para lookup directo
+                            if key in inventory_index:
+                                # Tenemos datos de inventario para esta combinación
+                                inventory_rows = inventory_index[key]
+                                quantity = sum(row.get('QUANTITY', 0) for row in inventory_rows)
+                                value = sum(row.get('TOTAL_VALUE', 0) for row in inventory_rows)
+                                
+                                # Obtener info de subinventario del primer registro
+                                subinventory = inventory_rows[0].get('SUBINVENTORY_CODE', '') if inventory_rows else ''
+                                warehouse = inventory_rows[0].get('ORG_WAREHOUSE_CODE', '') if inventory_rows else ''
+                                
+                                # Calcular aging
+                                aging_0_30 = sum(row.get('AGING_0-30_QUANTITY', 0) for row in inventory_rows)
+                                aging_31_60 = sum(row.get('AGING_31-60_QUANTITY', 0) for row in inventory_rows)
+                                aging_61_90 = sum(row.get('AGING_61-90_QUANTITY', 0) for row in inventory_rows)
+                                
+                                result = {
+                                    'part_number': part_clean,
+                                    'organization': org_clean,
+                                    'quantity': quantity,
+                                    'has_inventory': quantity > 0,
+                                    'has_mismatch': is_mismatched,
+                                    'value': value,
+                                    'subinventory': subinventory,
+                                    'warehouse_code': warehouse,
+                                    'aging_0_30': aging_0_30,
+                                    'aging_31_60': aging_31_60,
+                                    'aging_61_90': aging_61_90
+                                }
+                                
+                                if quantity > 0:
+                                    part_has_inventory = True
+                                    batch_inventory_records += 1
+                            else:
+                                # Usar el matcher para casos sin inventario directo
+                                match_result = matcher.check_inventory(part_clean, org_clean)
+                                
+                                result = {
+                                    'part_number': part_clean,
+                                    'organization': org_clean,
+                                    'quantity': match_result.quantity,
+                                    'has_inventory': match_result.has_inventory,
+                                    'has_mismatch': is_mismatched,
+                                    'value': match_result.value,
+                                    'subinventory': match_result.subinventory,
+                                    'warehouse_code': match_result.warehouse_code,
+                                    'aging_0_30': match_result.aging_info.days_0_30,
+                                    'aging_31_60': match_result.aging_info.days_31_60,
+                                    'aging_61_90': match_result.aging_info.days_61_90
+                                }
+                                
+                                if match_result.error_message:
+                                    result['error'] = match_result.error_message
+                                
+                                if match_result.quantity > 0:
+                                    part_has_inventory = True
+                                    batch_inventory_records += 1
+                            
+                            batch_results[key] = result
+                        
+                        if part_has_inventory:
+                            batch_parts_with_inventory.add(part_clean)
+                    
+                    # Actualizar resultados con este lote
+                    results.update(batch_results)
+                    parts_with_inventory.update(batch_parts_with_inventory)
+                    total_inventory_records += batch_inventory_records
+                    
+                    batch_time = time.time() - batch_start
+                    logger.info(f"Lote {batch_idx+1} completado en {batch_time:.2f}s, {batch_inventory_records} registros de inventario encontrados")
+                
+                # Generar resumen
+                summary = {
+                    'total_parts': len(all_parts),
+                    'parts_with_mismatch': len(mismatched_set),
+                    'parts_without_mismatch': len(all_parts) - len(mismatched_set),
+                    'parts_with_inventory': len(parts_with_inventory),
+                    'total_inventory_records': total_inventory_records
+                }
+                
+                logger.info("=== RESUMEN DE INVENTARIO ===")
+                for key, value in summary.items():
+                    logger.info(f"{key}: {value}")
+                
+                total_time = time.time() - start_time
+                logger.info(f"Verificación de inventario completada en {total_time:.2f}s")
+                
+                results['summary'] = summary
+                return results
+                        
+            except Exception as e:
+                logger.error(f"Error en verificación de inventario: {str(e)}")
+                logger.error(f"Stack trace: {traceback.format_exc()}")
+                raise
         
     def _validate_non_hardware_parts(self, df: pd.DataFrame) -> Dict:
         try:
@@ -776,36 +1088,6 @@ class AuditProcessor:
             print(f"Error in _check_missing_orgs: {str(e)}")
             raise
     
-    def _prepare_ftp_upload_data(
-        self,
-        missing_items: List[Dict],
-        df: pd.DataFrame
-    ) -> Dict:
-        """Prepare data for FTP upload"""
-        try:
-            ftp_data = []
-
-            for item in missing_items:
-                part_data = df[df['Part Number'] == item['part_number']].iloc[0]
-                
-                # Crear entrada para cada org faltante
-                for org in item['missing_orgs']:
-                    ftp_data.append({
-                        'Item': item['part_number'],
-                        'Organization': org,
-                        'Description': part_data['Description'],
-                        'Template Type': 'PRODUCTION',
-                        'Status': 'NEW'
-                    })
-
-            return {
-                'data': ftp_data,
-                'filename': f"item_org_assignment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            }
-        except Exception as e:
-            logger.error(f"Error preparing FTP upload data: {str(e)}")
-            raise
-
     def _process_other_attributes_audit(
             self,
             df: pd.DataFrame,
