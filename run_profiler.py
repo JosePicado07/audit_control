@@ -28,7 +28,7 @@ def main():
     
     # Configuración - Ajustar a tu entorno
     contract = "MERCK"
-    file_path = r"D:\Descargas\wwt_gah_direct_scheduleable MERCK AUDIT.xlsx"
+    file_path = r"C:\Users\picadocj\Desktop\wwt_gah_direct_scheduleable MERCK AUDIT.xlsx"
     inventory_file = None  # Completar si es necesario
     
     print(f"Archivo: {file_path}")
