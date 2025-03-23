@@ -1,4 +1,3 @@
-from functools import partial
 import traceback
 from typing import Dict, List, Optional, Union
 from pathlib import Path
@@ -34,7 +33,6 @@ class AuditService:
         self.report_generator = report_generator
         self.excel_repository = excel_repository
         self.config_path = Path(config_path) if config_path else Path.cwd() / "config"
-        self.executor = ThreadPoolExecutor()
 
     def execute_audit(self, contract: str, file_path: str, inventory_file: Optional[str] = None) -> Dict:
         try:

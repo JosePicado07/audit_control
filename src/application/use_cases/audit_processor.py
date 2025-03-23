@@ -1,5 +1,4 @@
 from pathlib import Path
-import trace
 import traceback
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
@@ -7,7 +6,6 @@ import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from datetime import datetime
-from functools import partial
 
 from domain.entities.inventory_entity import InventoryAgingInfo
 from .inventory.inventory_matcher import InventoryMatcher
@@ -776,35 +774,6 @@ class AuditProcessor:
             print(f"Error in _check_missing_orgs: {str(e)}")
             raise
     
-    def _prepare_ftp_upload_data(
-        self,
-        missing_items: List[Dict],
-        df: pd.DataFrame
-    ) -> Dict:
-        """Prepare data for FTP upload"""
-        try:
-            ftp_data = []
-
-            for item in missing_items:
-                part_data = df[df['Part Number'] == item['part_number']].iloc[0]
-                
-                # Crear entrada para cada org faltante
-                for org in item['missing_orgs']:
-                    ftp_data.append({
-                        'Item': item['part_number'],
-                        'Organization': org,
-                        'Description': part_data['Description'],
-                        'Template Type': 'PRODUCTION',
-                        'Status': 'NEW'
-                    })
-
-            return {
-                'data': ftp_data,
-                'filename': f"item_org_assignment_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            }
-        except Exception as e:
-            logger.error(f"Error preparing FTP upload data: {str(e)}")
-            raise
 
     def _process_other_attributes_audit(
             self,

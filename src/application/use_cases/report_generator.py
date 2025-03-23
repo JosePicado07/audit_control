@@ -10,7 +10,6 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from domain.entities.audit_entity import AuditResult
 from infrastructure.logging.logger import get_logger
 from infrastructure.persistence.excel_repository import ExcelRepository
-import json
 
 # Configurar logger
 logger = get_logger(__name__)
@@ -129,7 +128,7 @@ class ReportGenerator:
             
             # Generar reporte interno con manejo de errores
             try:
-                internal_report_path = self._generate_internal_report(
+                internal_report_path,= self._generate_internal_report(
                     audit_result=audit_result,
                     validation_results=validation_results,
                     timestamp=timestamp
@@ -201,10 +200,6 @@ class ReportGenerator:
     ) -> Path:
         try:
             # DEBUG: Imprimir contenido de serial_results
-            logger.debug("Contenido de serial_results:")
-            logger.debug(f"Claves disponibles: {serial_results.keys()}")
-            logger.debug(f"Datos: {serial_results.get('data', 'Sin datos')}")
-            logger.debug(f"Partes con discrepancias: {serial_results.get('mismatched_parts', 'Sin discrepancias')}")
             contract_name = program_requirements.get('contract', 'Unknown')
             contract_name = contract_name.replace(' ', '_')  # Reemplazar espacios por guiones bajos
             excel_path = self.output_dir / f"serial_control_validation_{contract_name}_{timestamp}.xlsx"
@@ -223,11 +218,9 @@ class ReportGenerator:
                 '94', '97'
             ]
             
-            logger.info(f"Usando lista fija de {len(physical_orgs)} organizaciones físicas")
             
             # Filtrar organizaciones de prueba (que comienzan con Z)
             physical_orgs = [org for org in physical_orgs if not org.upper().startswith('Z')]
-            logger.info(f"Después de filtrar orgs Z: {len(physical_orgs)} organizaciones físicas")
             
             # Generar datos de validación de serie con las organizaciones físicas
             serial_validation_df = self._generate_serial_validation_data(
@@ -236,12 +229,6 @@ class ReportGenerator:
                 program_requirements
             )
             
-            # DEBUG: Verificar DataFrame de validación
-            logger.debug("DataFrame de validación de serie:")
-            logger.debug(f"Columnas: {serial_validation_df.columns.tolist()}")
-            logger.debug(f"Primeros registros:\n{serial_validation_df.head()}")
-            logger.debug(f"Total de registros: {len(serial_validation_df)}")
-
             # Generar resumen mejorado con sistema de tolerancia
             # Identificar partes que tienen discrepancias Y tienen inventario
             mismatches_with_inventory = serial_validation_df[
@@ -293,9 +280,6 @@ class ReportGenerator:
                 'timestamp': datetime.now().isoformat()
             }
 
-            print("\n=== EXTERNAL REPORT SUMMARY ===")
-            for key, value in summary.items():
-                print(f"{key}: {value}")
                 
             # Log detallado de mismatches con inventario para diagnóstico
             if mismatches_with_inventory_count > 0:
@@ -304,10 +288,7 @@ class ReportGenerator:
                     part = row['Part Number']
                     details = row['Inventory Details']
                     logger.info(f"Parte crítica para revisión: {part} - {details}")
-            
-            
-            # En _generate_external_report, justo antes de escribir a Excel
-            logger.info("Verificando valores en la columna Item Status")
+
 
             # Verificar si la columna Item Status existe y tiene valores
             # Verificar más exhaustivamente la presencia de valores válidos en Item Status
@@ -327,70 +308,7 @@ class ReportGenerator:
                 logger.info(f"Tiene valores no vacíos: {non_empty_status}")
                 logger.info(f"Tiene valores N/A: {has_na_values}")
                 logger.info(f"Conclusión final - has_valid_item_status: {has_valid_item_status}")
-            
-            # Verificar valores para parte específica de ejemplo
-            example_part = "MR56-HW.ACTUAL.324.FITCH"
-            example_rows = serial_validation_df[serial_validation_df['Part Number'] == example_part]
-            if not example_rows.empty:
-                logger.info(f"Item Status para parte ejemplo {example_part}: '{example_rows['Item Status'].iloc[0]}'")
-            else:
-                logger.warning(f"Parte ejemplo {example_part} no encontrada antes de verificación")
-
-            if not has_valid_item_status:
-                logger.warning("Columna Item Status existe pero está vacía - rellenando con valores del DataFrame original")
-                
-                # Crear diccionario de mapeo
-                item_status_dict = {}
-                
-                # Obtener valores del DataFrame original
-                if isinstance(serial_results.get('data', None), pd.DataFrame):
-                    df_original = serial_results['data']
-                    if 'Item Status' in df_original.columns:
-                        logger.info("Obteniendo Item Status del DataFrame original")
-                        for part, group in df_original.groupby('Part Number'):
-                            if not group['Item Status'].fillna('').eq('').all():
-                                item_status_dict[part] = group['Item Status'].iloc[0]
-                
-                # Si no hay valores en el DataFrame, buscar en la lista de datos
-                if not item_status_dict and isinstance(serial_results.get('data', None), list):
-                    logger.info("Obteniendo Item Status de la lista de datos original")
-                    for item in serial_results['data']:
-                        if 'part_number' in item and 'item_status' in item and item['item_status']:
-                            item_status_dict[item['part_number']] = item['item_status']
-                
-                # Aplicar el diccionario al DataFrame
-                if item_status_dict:
-                    logger.info(f"Aplicando {len(item_status_dict)} valores de Item Status al DataFrame")
-                    serial_validation_df['Item Status'] = serial_validation_df['Part Number'].map(
-                        lambda x: item_status_dict.get(x, '')
-                    )
-                    
-                    # Asegurar que la columna Item Status sea la primera
-                    if 'Item Status' in serial_validation_df.columns:
-                        cols = serial_validation_df.columns.tolist()
-                        if cols[0] != 'Item Status':
-                            cols.remove('Item Status')
-                            serial_validation_df = serial_validation_df[['Item Status'] + cols]
-                            logger.info("Reordenado columnas para que Item Status sea la primera")
-                else:
-                    logger.warning("No se encontraron valores de Item Status en ninguna fuente de datos") 
-            
-            # DEBUG: Verificar resumen
-            logger.debug("Summary generated:")
-            logger.debug(str(summary))
-            
-            # Verificación final antes de escribir a Excel
-            logger.info("=============== VERIFICACIÓN FINAL ANTES DE ESCRIBIR A EXCEL ===============")
-            logger.info(f"DataFrame final para Excel - Columnas: {serial_validation_df.columns.tolist()}")
-            logger.info(f"DataFrame final para Excel - Forma: {serial_validation_df.shape}")
-            
-            # Verificar específicamente la parte de ejemplo
-            example_part = "MR56-HW.ACTUAL.324.FITCH"
-            example_rows_final = serial_validation_df[serial_validation_df['Part Number'] == example_part]
-            if not example_rows_final.empty:
-                logger.info(f"VERIFICACIÓN FINAL - Item Status para {example_part}: '{example_rows_final['Item Status'].iloc[0]}'")
-            else:
-                logger.warning(f"VERIFICACIÓN FINAL - Parte {example_part} no encontrada antes de escribir a Excel")
+                 
                 
             # Verificar distribución de valores de Item Status
             if 'Item Status' in serial_validation_df.columns:
@@ -411,7 +329,7 @@ class ReportGenerator:
                 
                 # Escribir resumen
                 pd.DataFrame([summary]).to_excel(writer, sheet_name="Summary", index=False)
-                self._format_worksheet(writer.sheets["Summary"])
+                self._format_worksheet_with_conditional(writer.sheets["Summary"])
             
             return excel_path
         
@@ -429,11 +347,9 @@ class ReportGenerator:
 
             # Convert audit results to base dataframe
             results_df = self._convert_to_dataframe(audit_result)
-            print(f"\n[Internal Report] DataFrame antes de validación:\n{results_df.head()}")
             
             # Generate org validation dataframe
             org_validation_df = self._generate_org_validation_data(results_df, org_destination)
-            print(f"\n[Internal Report] DataFrame después de validación:\n{org_validation_df.head()}")
 
             # MEJORA: Generación de resumen con conteo correcto de problemas
             # Contador de problemas por organización
@@ -467,11 +383,6 @@ class ReportGenerator:
                 'timestamp': datetime.now().isoformat()
             }
             
-            # Log detallado del resumen
-            logger.info("\n=== RESUMEN DEL REPORTE INTERNO ===")
-            logger.info(f"Total de partes: {summary['total_parts']}")
-            logger.info(f"Problemas de organizaciones faltantes: {summary['missing_orgs_issues']}")
-            logger.info(f"Problemas por organización: {issues_by_org}")
             
             with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
                 org_validation_df.to_excel(writer, sheet_name="Audit Results", index=False)
@@ -482,9 +393,9 @@ class ReportGenerator:
                     'Missing in Org'
                 )
                 pd.DataFrame([summary]).to_excel(writer, sheet_name="Summary", index=False)
-                self._format_worksheet(writer.sheets["Summary"])
+                self._format_worksheet_with_conditional(writer.sheets["Summary"])
             
-            return excel_path, summary
+            return excel_path
             
         except Exception as e:
             logger.error(f"Error generating internal report: {str(e)}")
@@ -616,24 +527,6 @@ class ReportGenerator:
 
                     
                     elif col_name == 'Item Status':
-                        # Log para verificar valores de Item Status al aplicar formato
-                        logger.info("=============== FORMATO DE COLUMNA ITEM STATUS ===============")
-                        logger.info(f"Valores en columna 'Item Status': {df[col_name].value_counts().to_dict()}")
-                        
-                        # Verificar específicamente la parte de ejemplo
-                        example_part = "MR56-HW.ACTUAL.324.FITCH"
-                        example_idx = None
-                        for idx, row_val in enumerate(df['Part Number']):
-                            if row_val == example_part:
-                                example_idx = idx
-                                break
-                                
-                        if example_idx is not None:
-                            example_status = df.iloc[example_idx]['Item Status']
-                            logger.info(f"FORMATO CONDICIONAL - Item Status para {example_part}: '{example_status}'")
-                        else:
-                            logger.warning(f"FORMATO CONDICIONAL - Parte {example_part} no encontrada al aplicar formato")
-                            
                         for row_idx, value in enumerate(df[col_name], 2):
                             cell = worksheet.cell(row=row_idx, column=col_idx)
                             value_upper = str(value).strip().upper()
@@ -714,26 +607,6 @@ class ReportGenerator:
         Utiliza physical_orgs para las columnas de organizaciones físicas.
         MEJORA: Ahora usa intersección de organizaciones físicas predefinidas y organizaciones en datos.
         """
-        # Verificar DataFrame ANTES del formato
-        logger.info("=============== MÉTODO _format_validation_dataframe ===============")
-        logger.info(f"DataFrame recibido - Forma: {df.shape}")
-        logger.info(f"DataFrame recibido - Columnas: {df.columns.tolist()}")
-        
-        # Verificar especialmente la presencia de Item Status
-        example_part = "MR56-HW.ACTUAL.324.FITCH"
-        if 'Item Status' in df.columns:
-            logger.info(f"VERIFICACIÓN 'Item Status' EN ENTRADA _format_validation_dataframe:")
-            status_values = df['Item Status'].value_counts().to_dict()
-            logger.info(f"Distribución de valores en Item Status: {status_values}")
-            
-            # Verificar especialmente la parte de ejemplo
-            example_rows = df[df['Part Number'] == example_part]
-            if not example_rows.empty:
-                logger.info(f"ENTRADA FORMATO - Item Status para {example_part}: '{example_rows['Item Status'].iloc[0]}'")
-            else:
-                logger.warning(f"ENTRADA FORMATO - Parte {example_part} no encontrada")
-        else:
-            logger.warning("ALERTA CRÍTICA: Columna 'Item Status' NO PRESENTE en DataFrame de entrada a _format_validation_dataframe")
         
         # Definir orden de columnas base
         columns = [
@@ -807,34 +680,8 @@ class ReportGenerator:
             if col not in df.columns:
                 df[col] = ''
         
-        # Verificar conservación de datos importantes justo antes de filtrar columnas
-        if 'Item Status' in df.columns and 'Part Number' in df.columns:
-            for part in [example_part]:
-                part_rows = df[df['Part Number'] == part]
-                if not part_rows.empty:
-                    current_status = part_rows['Item Status'].iloc[0]
-                    logger.info(f"VERIFICACIÓN PRE-FILTRADO - Parte {part} - Item Status: '{current_status}'")
-                else:
-                    logger.warning(f"VERIFICACIÓN PRE-FILTRADO - Parte {part} no encontrada")
-        
         # Filtrar para incluir solo las columnas definidas (por si hay columnas extras)
-        result_df = df[columns]
-        
-        # Verificar DataFrame DESPUÉS del formato
-        logger.info("=============== RESULTADO _format_validation_dataframe ===============")
-        logger.info(f"DataFrame resultado - Forma: {result_df.shape}")
-        logger.info(f"DataFrame resultado - Columnas: {result_df.columns.tolist()}")
-        
-        # Verificar específicamente si la parte de ejemplo mantiene su Item Status
-        if 'Item Status' in result_df.columns:
-            example_rows_after = result_df[result_df['Part Number'] == example_part]
-            if not example_rows_after.empty:
-                logger.info(f"SALIDA FORMATO - Item Status para {example_part}: '{example_rows_after['Item Status'].iloc[0]}'")
-            else:
-                logger.warning(f"SALIDA FORMATO - Parte {example_part} no encontrada después del formato")
-        else:
-            logger.warning("ALERTA CRÍTICA: Columna 'Item Status' NO PRESENTE en DataFrame resultado de _format_validation_dataframe")
-        
+        result_df = df[columns]        
         return result_df
         
     def _convert_to_dataframe(self, audit_result: AuditResult) -> pd.DataFrame:
@@ -979,21 +826,6 @@ class ReportGenerator:
             logger.info(f"DataFrame original - Forma: {df_data.shape}")
             logger.info(f"DataFrame original - Columnas: {df_data.columns.tolist()}")
             
-            # 2. Log: Verificación específica de 'Item Status' en el DataFrame original
-            example_part = "MR56-HW.ACTUAL.324.FITCH"
-            if 'Item Status' in df_data.columns:
-                logger.info("VERIFICACIÓN DE 'Item Status' EN DATAFRAME ORIGINAL")
-                logger.info(f"Valores únicos en 'Item Status': {df_data['Item Status'].unique()}")
-                
-                # Verificar especialmente la parte de ejemplo
-                example_rows = df_data[df_data['Part Number'] == example_part]
-                if not example_rows.empty:
-                    example_status = example_rows['Item Status'].iloc[0]
-                    logger.info(f"Item Status para parte {example_part}: {example_status}")
-                else:
-                    logger.warning(f"Parte de ejemplo {example_part} no encontrada en DataFrame original")
-            else:
-                logger.warning("No se encontró la columna 'Item Status' en el DataFrame original")
             
             # Continuar con el análisis estándar
             inventory_map = results.get('inventory_map', {})
@@ -1057,7 +889,6 @@ class ReportGenerator:
             # Normalizar organizaciones en el DataFrame
             df_data['Organization'] = df_data['Organization'].astype(str).str.strip()
             df_data['Organization'] = df_data['Organization'].str.zfill(2)
-            logger.debug(f"Organizaciones únicas después de normalización: {df_data['Organization'].unique()}")
              
             # 2. Procesar TODOS los datos, no solo los mismatches
             all_parts = df_data['Part Number'].unique()
@@ -1075,20 +906,7 @@ class ReportGenerator:
             # Ya hemos normalizado mismatched_parts arriba, no sobrescribir aquí
             # (mantenemos la versión normalizada)
             dynamic_columns = results.get('dynamic_columns', [])
-            
-            # DIAGNÓSTICO: Verificar específicamente el ejemplo mencionado
-            example_part = "MR56-HW.ACTUAL.324.FITCH"
-            example_rows = df_data[df_data['Part Number'] == example_part]
-            if not example_rows.empty:
-                logger.info(f"===== ANÁLISIS DE PARTE ESPECÍFICA: {example_part} =====")
-                logger.info(f"Número de registros encontrados: {len(example_rows)}")
-                for idx, row in example_rows.iterrows():
-                    logger.info(f"Registro {idx}:")
-                    for col in row.index:
-                        logger.info(f"  {col}: '{row[col]}'")
-                logger.info("===============================================")
-            else:
-                logger.warning(f"Parte específica no encontrada: {example_part}")
+
 
             print(f"Processing {len(df_data)} records with {len(physical_orgs)} organizations")
             
@@ -1115,13 +933,6 @@ class ReportGenerator:
                 # NUEVA IMPLEMENTACIÓN: Obtener Status primero antes de buscar Item Status
                 # Inicializar el valor de status que usaremos
                 status_value = 'N/A'
-                
-                # Registrar para diagnóstico
-                is_example_part = part_number == "MR56-HW.ACTUAL.324.FITCH"
-                if is_example_part:
-                    logger.info(f"=========== PROCESAMIENTO DE PARTE: {part_number} ===========")
-                    logger.info(f"Registros en grupo: {len(part_group)}")
-                    logger.info(f"Columnas disponibles: {part_group.columns.tolist()}")
                 
                 # 1. PRIMERO intentamos obtener de la columna Status original
                 if 'Status' in part_group.columns:
@@ -1278,7 +1089,6 @@ class ReportGenerator:
                         
                     # Log con nivel de detalle adecuado para auditoría posterior
                     logger.info(f"MISMATCH - Parte {part_norm} - Razón: {reason}")
-                    logger.info(f"Valores por organización: {json.dumps(org_values_for_comparison, indent=2)}")
                     logger.debug(f"Valores únicos encontrados: {unique_serial_values}")
                 else:
                     # Importante para diagnóstico: registrar siempre datos que llevaron a MATCH
@@ -1336,9 +1146,6 @@ class ReportGenerator:
                     'Missing orgs according to Program Requirements': row.get('Missing orgs according to Program Requirements', 'None')
                 })
 
-                # 4. Log: Verificar el Item Status justo antes de agregar el row a validation_data
-                if is_example_part:
-                    logger.info(f"PARTE EJEMPLO - Item Status antes de agregar a validation_data: '{row['Item Status']}'")
                 
                 validation_data.append(row)
 
@@ -1349,12 +1156,6 @@ class ReportGenerator:
             logger.info(f"Forma del DataFrame: {validation_df.shape}")
             logger.info(f"Columnas: {validation_df.columns.tolist()}")
             
-            # 6. Verificar la parte de ejemplo en el DataFrame final
-            example_rows_before = validation_df[validation_df['Part Number'] == example_part]
-            if not example_rows_before.empty:
-                logger.info(f"VERIFICACIÓN PRE-FORMATO - Item Status para {example_part}: '{example_rows_before['Item Status'].iloc[0]}'")
-            else:
-                logger.warning(f"ALERTA: Parte ejemplo {example_part} no encontrada en DataFrame antes de formato")
             
             # DIAGNÓSTICO: Verificar el DataFrame final
             logger.info("===== DATAFRAME FINAL =====")
@@ -1362,13 +1163,6 @@ class ReportGenerator:
             if 'Item Status' in validation_df.columns:
                 status_values = validation_df['Item Status'].value_counts().to_dict()
                 logger.info(f"Distribución de valores en Item Status: {status_values}")
-                
-                # Verificar específicamente el ejemplo mencionado
-                example_rows = validation_df[validation_df['Part Number'] == example_part]
-                if not example_rows.empty:
-                    logger.info(f"Item Status final para {example_part}: '{example_rows['Item Status'].iloc[0]}'")
-                else:
-                    logger.warning(f"Parte {example_part} no encontrada en DataFrame final")
             else:
                 logger.warning("Columna 'Item Status' no encontrada en DataFrame final")
             logger.info("===========================")
@@ -1468,24 +1262,17 @@ class ReportGenerator:
                 if severity_level == "CRÍTICA" and (missing_pct > 40 or extra_pct > 40):
                     logger.error(f"INCONSISTENCIA EXTREMA: Discrepancias superan el 40% - CONTINUANDO PROCESO")
                     # Guardar datos para posterior análisis pero SIN interrumpir
-                    self._save_discrepancy_data(original_parts, processed_mismatches, missing, extra)
                 
                 # Registrar advertencia detallada y continuar el proceso EN TODOS LOS CASOS
                 logger.warning(f"Continuando procesamiento a pesar de discrepancia {severity_level.lower()}")
                 # Información específica sobre las partes con problemas (ejemplos limitados)
-                self._log_problematic_parts(missing, extra)
 
             return self._format_validation_dataframe(validation_df, physical_orgs, dynamic_columns)
 
         except Exception as e:
             logger.error(f"Error en generación de datos de validación: {str(e)}")
             raise
-
-    def _format_worksheet(self, worksheet) -> None:
-        """Format worksheet with basic styling."""
-        self._format_worksheet_with_conditional(worksheet, None)
-
-        
+   
     def _generate_org_validation_data(self, df: pd.DataFrame, org_destination: List[str]) -> pd.DataFrame:
         """
         Genera datos de validación por organización a partir de un DataFrame de auditoría.
@@ -1497,8 +1284,6 @@ class ReportGenerator:
         Returns:
             DataFrame con datos de validación por organización
         """
-        self._analyze_step(df, "BEFORE ORG VALIDATION")
-
         validation_data = []
         
         # IMPLEMENTACIÓN CORREGIDA: Asegurar que org_destination tiene valores correctos
@@ -1822,7 +1607,6 @@ class ReportGenerator:
                 logger.warning(f"Ejemplos: {sample}")
         
         # Verificación final antes de retornar
-        self._analyze_step(result_df, "AFTER ORG VALIDATION")
         return result_df
     
     def _clean_dataframe_values(self, df: pd.DataFrame) -> None:
@@ -1870,241 +1654,7 @@ class ReportGenerator:
         for col in df.columns:
             if col not in serial_control_cols:
                 df[col] = df[col].fillna('')
-            
-    
-    def _write_main_results(
-        self, 
-        df: pd.DataFrame, 
-        writer: pd.ExcelWriter, 
-        program_requirements: Dict
-    ) -> pd.DataFrame:
-        try:
-            # DEBUG: Imprimir información inicial del DataFrame
-            print("DataFrame inicial:")
-            print.debug(f"Columnas: {df.columns.tolist()}")
-            print(f"Primeros registros:\n{df.head()}")
-            print(f"Total de registros: {len(df)}")
-            print(f"Números de parte únicos: {df['Part Number'].nunique()}")
-
-            # Verificar requisitos del programa
-            all_orgs = sorted(program_requirements.get('org_destination', []))
-            print(f"Organizaciones objetivo: {all_orgs}")
-
-            # Verificar que todos los campos esperados estén presentes
-            expected_columns = [
-                'Part Number', 'Manufacturer', 'Description', 'Vertex', 
-                'Serial Control', 'Status', 'Organization'
-            ]
-            missing_columns = [col for col in expected_columns if col not in df.columns]
-            if missing_columns:
-                logger.error(f"Columnas faltantes: {missing_columns}")
-                raise ValueError(f"Faltan columnas obligatorias: {missing_columns}")
-
-            main_data = []
-
-            for part_number in df['Part Number'].unique():
-                # DEBUG: Rastrear cada número de parte
-                print(f"Procesando número de parte: {part_number}")
-                
-                part_data = df[df['Part Number'] == part_number]
-                
-                # Validación adicional de datos
-                if len(part_data) == 0:
-                    logger.warning(f"No hay datos para el número de parte {part_number}")
-                    continue
-
-                base_info = part_data.iloc[0]
-                
-                # DEBUG: Imprimir información base de cada parte
-                print(f"Información base de {part_number}:")
-                print(str(base_info))
-
-                row = {
-                    'Part Number': part_number,
-                    'Manufacturer': base_info['Manufacturer'],
-                    'Description': base_info['Description'],
-                    'Vertex': base_info['Vertex'],
-                    'Serial Control match?': base_info.get('Serial Control', 'N/A')
-                }
-                
-                # Procesamiento de organizaciones
-                for org in all_orgs:
-                    org_data = part_data[part_data['Organization'] == org]
-                    
-                    # DEBUG: Verificar datos por organización
-                    print(f"Datos para org {org} de {part_number}:")
-                    print(str(org_data))
-
-                    if not org_data.empty:
-                        # Lógica para determinar valor de serie
-                        serial_value = ('Dynamic entry at inventory receipt' 
-                                    if org_data['Serial Control'].iloc[0] == 'YES'
-                                    else 'No serial number control')
-                        row[f'org {org}'] = serial_value
-                        row[f'Inventory on Hand {org}'] = 'Y' if org_data['On Hand Quantity'].iloc[0] > 0 else 'N'
-                    else:
-                        row[f'org {org}'] = 'Not found in org'
-                        row[f'Inventory on Hand {org}'] = 'N'
-                
-                # Campos adicionales
-                row.update({
-                    'NPI Recommendations': '',
-                    'Serial control Owner Notes': '',
-                    'NPI Action/Data update': '',
-                    'Status': base_info.get('Status', 'Unknown'),
-                    'Item Org destination mismatch?': 'Yes' if part_data['Status'].eq('Missing Org').any() else 'No',
-                    'Organization code mismatch': '',
-                    'Action Required': ''
-                })
-                
-                main_data.append(row)
-            
-            # Creación de DataFrame final
-            main_df = pd.DataFrame(main_data)
-            
-            # DEBUG: Verificar DataFrame final
-            print("DataFrame final antes de escribir:")
-            print(f"Columnas: {main_df.columns.tolist()}")
-            print(f"Primeros registros:\n{main_df.head()}")
-            print(f"Total de registros: {len(main_df)}")
-
-            # Definir orden de columnas
-            columns = [
-                'Part Number', 'Manufacturer', 'Description', 'Vertex', 
-                'Serial Control match?'
-            ]
-            
-            for org in all_orgs:
-                columns.extend([
-                    f'org {org}',
-                    f'Inventory on Hand {org}'
-                ])
-            
-            columns.extend([
-                'NPI Recommendations',
-                'Serial control Owner Notes',
-                'NPI Action/Data update',
-                'Status',
-                'Item Org destination mismatch?',
-                'Organization code mismatch',
-                'Action Required'
-            ])
-            
-            # Asegurar columnas
-            for col in columns:
-                if col not in main_df.columns:
-                    main_df[col] = ''
-
-            main_df = main_df[columns]
-            
-            main_df.to_excel(writer, sheet_name="Audit Results", index=False)
-            
-            self._format_worksheet_with_conditional(
-                writer.sheets['Audit Results'],
-                main_df,
-                'Status',
-                'Missing Org'
-            )
-            
-            return writer.sheets['Audit Results']
-            
-        except Exception as e:
-            logger.error(f"Error escribiendo resultados principales: {str(e)}")
-            logger.error(f"Traza de error: {traceback.format_exc()}")
-            raise
-    
-    def _write_serial_validation_report(self, df: pd.DataFrame, writer: pd.ExcelWriter):
-        """
-        Write and format Serial Control Validation report with conditional formatting.
-        """
-        try:
-            # Write DataFrame
-            df.to_excel(writer, sheet_name="Serial Control Validation", index=False)
-            worksheet = writer.sheets["Serial Control Validation"]
-            
-            # Format headers
-            for idx, col in enumerate(df.columns, 1):
-                cell = worksheet.cell(row=1, column=idx)
-                cell.font = Font(bold=True)
-                cell.fill = PatternFill(
-                    start_color=self.COLORS['HEADER'],
-                    end_color=self.COLORS['HEADER'],
-                    fill_type='solid'
-                )
-                
-                # Adjust column width
-                max_length = max(
-                    len(str(col)),
-                    df[col].astype(str).apply(len).max()
-                )
-                worksheet.column_dimensions[get_column_letter(idx)].width = max_length + 2
-
-            # Apply conditional formatting
-            for col_idx, col_name in enumerate(df.columns, 1):
-                if col_name == 'Serial Control match?' or col_name == 'Status':
-                    for row_idx, value in enumerate(df[col_name], 2):
-                        cell = worksheet.cell(row=row_idx, column=col_idx)
-                        if value in ['Mismatch', 'Missing Org']:
-                            cell.fill = PatternFill(
-                                start_color=self.COLORS['ERROR'],
-                                end_color=self.COLORS['ERROR'],
-                                fill_type='solid'
-                            )
-                        else:
-                            cell.fill = PatternFill(
-                                start_color=self.COLORS['SUCCESS'],
-                                end_color=self.COLORS['SUCCESS'],
-                                fill_type='solid'
-                            )
-                elif col_name.startswith('org '):
-                    for row_idx, value in enumerate(df[col_name], 2):
-                        cell = worksheet.cell(row=row_idx, column=col_idx)
-                        if value == 'Not found in org':
-                            cell.fill = PatternFill(
-                                start_color=self.COLORS['ERROR'],
-                                end_color=self.COLORS['ERROR'],
-                                fill_type='solid'
-                            )
-                        else:
-                            cell.fill = PatternFill(
-                                start_color=self.COLORS['SUCCESS'],
-                                end_color=self.COLORS['SUCCESS'],
-                                fill_type='solid'
-                            )
-
-            # Add borders
-            thin_border = Border(
-                left=Side(style='thin'),
-                right=Side(style='thin'),
-                top=Side(style='thin'),
-                bottom=Side(style='thin')
-            )
-            
-            for row in worksheet.iter_rows(min_row=1, max_row=len(df) + 1):
-                for cell in row:
-                    cell.border = thin_border
-
-            # Freeze top row
-            worksheet.freeze_panes = 'A2'
-            
-            return worksheet
-
-        except Exception as e:
-            logger.error(f"Error writing serial validation report: {str(e)}")
-            raise
-        
-    def _analyze_step(self, df: pd.DataFrame, step_name: str) -> None:
-        print(f"\n=== {step_name} ===")
-        print("Columns:", df.columns.tolist())
-        print(f"\nFirst 3 rows of {len(df)} total:")
-        print(df.head(3).to_string())
-        if 'Organization' in df.columns:
-            print("\nUnique Organizations:")
-            print(df['Organization'].unique())
-        if 'Status' in df.columns:
-            print("\nStatus Distribution:")
-            print(df['Status'].value_counts())
-            
+                       
             
     def _format_inventory_status(self, inv_data: Dict) -> str:
         """Formatea el estado de inventario con formato de texto consistente."""
@@ -2361,254 +1911,3 @@ class ReportGenerator:
             if len(extra) > max_examples:
                 logger.warning(f"... y {len(extra) - max_examples} más")
                 
-    def _log_problematic_parts(self, missing: set, extra: set):
-        """
-        Registra información detallada sobre partes problemáticas específicas.
-        
-        Args:
-            missing: Conjunto de partes faltantes
-            extra: Conjunto de partes extras
-        """
-        # Registrar detalles de hasta 3 partes de cada tipo para diagnóstico
-        if missing:
-            logger.info("Ejemplos de partes faltantes para diagnóstico:")
-            for i, part in enumerate(list(missing)[:3]):
-                norm_part = re.sub(r'[.\s-]', '', part.upper())
-                logger.info(f"Parte {i+1}: Original '{part}' → Normalizada '{norm_part}'")
-                
-        if extra:
-            logger.info("Ejemplos de partes extras para diagnóstico:")
-            for i, part in enumerate(list(extra)[:3]):
-                norm_part = re.sub(r'[.\s-]', '', part.upper())
-                logger.info(f"Parte {i+1}: Original '{part}' → Normalizada '{norm_part}'")
-                
-        # Verificar si alguna de las partes con problemas está en la lista de ejemplos
-        example_parts = {'20317.NC.2783.CHARTER', 'ONS-CFP2D-400G-C=.ACTUAL.324.CHARTER', 
-                         '450-AION.NC.2808.CHARTER', 'F5-UPG-QSFP+LR4.ACTUAL.11865.CHARTER', 
-                         '407-BBWV.ACTUAL.1205.CHARTER'}
-                    
-        for part in example_parts:
-            part_upper = part.upper()
-            if any(part_upper in m.upper() for m in missing) or any(part_upper in e.upper() for e in extra):
-                logger.warning(f"PARTE DE EJEMPLO DETECTADA CON PROBLEMAS: {part}")
-                
-    def _save_discrepancy_data(self, original_parts: set, processed_mismatches: set, 
-                              missing: set, extra: set):
-        """
-        Guarda datos detallados sobre discrepancias para análisis posterior.
-        
-        Args:
-            original_parts: Conjunto original de partes con mismatch
-            processed_mismatches: Conjunto procesado de partes con mismatch
-            missing: Conjunto de partes faltantes
-            extra: Conjunto de partes extras
-        """
-        try:
-            # Crear directorio si no existe
-            reports_dir = Path("reports/discrepancy_analysis")
-            reports_dir.mkdir(exist_ok=True, parents=True)
-            
-            # Nombre de archivo con timestamp
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            file_path = reports_dir / f"discrepancy_analysis_{timestamp}.txt"
-            
-            # Escribir datos de discrepancia
-            with open(file_path, 'w') as f:
-                f.write("=== ANÁLISIS DE DISCREPANCIAS ===\n\n")
-                f.write(f"Fecha y hora: {datetime.now().isoformat()}\n\n")
-                
-                f.write("RESUMEN:\n")
-                f.write(f"Total original: {len(original_parts)}\n")
-                f.write(f"Total procesado: {len(processed_mismatches)}\n")
-                f.write(f"Faltantes: {len(missing)}\n")
-                f.write(f"Extras: {len(extra)}\n\n")
-                
-                f.write("PARTES ORIGINALES:\n")
-                for part in sorted(original_parts):
-                    f.write(f"- {part}\n")
-                    
-                f.write("\nPARTES PROCESADAS:\n")
-                for part in sorted(processed_mismatches):
-                    f.write(f"- {part}\n")
-                    
-                f.write("\nPARTES FALTANTES:\n")
-                for part in sorted(missing):
-                    f.write(f"- {part}\n")
-                    
-                f.write("\nPARTES EXTRAS:\n")
-                for part in sorted(extra):
-                    f.write(f"- {part}\n")
-                
-            logger.info(f"Datos de discrepancia guardados en: {file_path}")
-            
-        except Exception as e:
-            logger.error(f"Error guardando datos de discrepancia: {str(e)}")
-        
-    def _validate_serial_consistency(self, raw_data: Dict, report_df: pd.DataFrame):
-        """
-        Verifica coherencia entre datos originales y reporte sin interrumpir el proceso.
-        
-        MODIFICACIÓN CRÍTICA: Nunca interrumpe el proceso, independientemente del 
-        nivel de discrepancia. Solo registra información para análisis posterior.
-        """
-        try:
-            # Contar mismatches en datos originales
-            original_mismatches = len(raw_data.get('mismatched_parts', []))
-            # Contar mismatches en reporte generado
-            report_mismatches = len(report_df[report_df['Serial Control match?'] == 'Mismatch'])
-            
-            # Log detallado para diagnóstico
-            logger.info(f"VERIFICACIÓN DE CONSISTENCIA:")
-            logger.info(f"Mismatches en datos originales: {original_mismatches}")
-            logger.info(f"Mismatches en reporte generado: {report_mismatches}")
-            
-            # Calcular discrepancia porcentual
-            if original_mismatches > 0:
-                discrepancy_pct = abs(original_mismatches - report_mismatches) / original_mismatches * 100
-                logger.info(f"Discrepancia porcentual: {discrepancy_pct:.2f}%")
-                
-                # Clasificar y registrar sin interrumpir en NINGÚN caso
-                if discrepancy_pct > 80:
-                    logger.error(f"DISCREPANCIA CRÍTICA EXTREMA: {discrepancy_pct:.2f}% - CONTINUANDO DE TODOS MODOS")
-                elif discrepancy_pct > 40:
-                    logger.error(f"DISCREPANCIA MUY ALTA: {discrepancy_pct:.2f}% - CONTINUANDO DE TODOS MODOS")
-                elif discrepancy_pct > 20:
-                    logger.error(f"DISCREPANCIA ALTA: {discrepancy_pct:.2f}% - CONTINUANDO DE TODOS MODOS")
-                elif discrepancy_pct > 5:
-                    logger.warning(f"Discrepancia moderada: {discrepancy_pct:.2f}%")
-                else:
-                    logger.info(f"Discrepancia mínima: {discrepancy_pct:.2f}%")
-                
-                # Mensaje explícito de continuación en todos los casos
-                logger.warning("CONTINUANDO PROCESO sin interrupciones para generar reporte completo")
-                
-            elif original_mismatches == 0 and report_mismatches > 0:
-                # Caso especial: no había mismatches originales pero se encontraron en el reporte
-                logger.warning(f"No había mismatches originales pero se encontraron {report_mismatches} en el reporte")
-                logger.warning("CONTINUANDO PROCESO para generar reporte completo")
-        
-        except Exception as e:
-            # Capturar cualquier excepción para evitar interrupciones
-            logger.error(f"Error en validación de consistencia: {str(e)}")
-            logger.error("IGNORANDO ERROR y continuando el proceso")
-        
-    def _validate_data_consistency(self, original_results: Dict, generated_df: pd.DataFrame) -> bool:
-        """
-        Analiza consistencia de datos pero SIEMPRE retorna True para continuar el proceso.
-        
-        MODIFICACIÓN CRÍTICA: Nunca interrumpe el proceso, independientemente de 
-        las discrepancias encontradas. Solo registra información para análisis.
-        """
-        try:
-            # Debug: Mostrar información del DataFrame
-            logger.debug(f"Columnas en DataFrame: {generated_df.columns.tolist()}")
-            logger.debug(f"Total de filas: {len(generated_df)}")
-            logger.debug(f"Distribución de 'Serial Control match?':\n{generated_df['Serial Control match?'].value_counts()}")
-            
-            # Normalizar Part Numbers
-            original_mismatches = set(
-                str(part).strip().upper() 
-                for part in original_results.get('mismatched_parts', [])
-            )
-            
-            mismatch_mask = generated_df['Serial Control match?'] == 'Mismatch'
-            logger.debug(f"Filas con Mismatch: {mismatch_mask.sum()}")
-            
-            generated_mismatches = set(
-                generated_df.loc[mismatch_mask, 'Part Number']
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-            
-            # Comparaciones detalladas
-            logger.debug(f"Original mismatches ({len(original_mismatches)}): {original_mismatches}")
-            logger.debug(f"Generated mismatches ({len(generated_mismatches)}): {generated_mismatches}")
-            
-            # Análisis de diferencias
-            missing = original_mismatches - generated_mismatches
-            extra = generated_mismatches - original_mismatches
-            
-            if missing or extra:
-                logger.warning("ADVERTENCIA: Inconsistencia detectada en validación de datos:")
-                if missing:
-                    logger.warning(f"Faltantes en reporte: {missing}")
-                if extra:
-                    logger.warning(f"Extras en reporte: {extra}")
-                
-                # Crear informe detallado sin interrumpir proceso
-                self._analyze_data_discrepancies(missing, extra, original_mismatches, generated_mismatches)
-                
-                # Mensaje explícito de continuación
-                logger.warning("CONTINUANDO PROCESO a pesar de inconsistencias en validación de datos")
-            else:
-                logger.info("Validación de datos: Sin inconsistencias detectadas")
-            
-            # SIEMPRE retornar True para que el proceso continúe
-            return True
-            
-        except Exception as e:
-            # Capturar cualquier excepción para evitar interrupciones
-            logger.error(f"Error en validación de consistencia de datos: {str(e)}")
-            logger.error("IGNORANDO ERROR y continuando el proceso")
-            # SIEMPRE retornar True incluso en caso de error
-            return True
-            
-    def _analyze_data_discrepancies(self, missing: set, extra: set, original: set, generated: set):
-        """
-        Analiza y registra detalles sobre discrepancias en la validación de datos.
-        
-        Args:
-            missing: Partes que deberían estar marcadas como mismatch pero no lo están
-            extra: Partes marcadas como mismatch que no deberían estarlo
-            original: Conjunto original de partes con mismatch
-            generated: Conjunto generado de partes con mismatch
-        """
-        try:
-            # Calcular porcentajes de discrepancias
-            missing_pct = len(missing) / max(len(original), 1) * 100
-            extra_pct = len(extra) / max(len(generated), 1) * 100
-            total_discrepancy_pct = (len(missing) + len(extra)) / max(len(original) + len(generated), 1) * 100
-            
-            # Registrar resumen estadístico
-            logger.warning(f"=== RESUMEN DE DISCREPANCIAS DE DATOS ===")
-            logger.warning(f"Total original de mismatches: {len(original)}")
-            logger.warning(f"Total generado de mismatches: {len(generated)}")
-            logger.warning(f"Faltantes: {len(missing)} partes ({missing_pct:.2f}%)")
-            logger.warning(f"Extras: {len(extra)} partes ({extra_pct:.2f}%)")
-            logger.warning(f"Discrepancia total: {total_discrepancy_pct:.2f}%")
-            
-            # Guardar detalles en archivo si las discrepancias son significativas
-            if missing_pct > 5 or extra_pct > 5:
-                # Crear directorio si no existe
-                reports_dir = Path("reports/data_validation")
-                reports_dir.mkdir(exist_ok=True, parents=True)
-                
-                # Nombre de archivo con timestamp
-                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                file_path = reports_dir / f"data_validation_{timestamp}.txt"
-                
-                with open(file_path, 'w') as f:
-                    f.write("=== ANÁLISIS DE DISCREPANCIAS EN VALIDACIÓN DE DATOS ===\n\n")
-                    f.write(f"Fecha y hora: {datetime.now().isoformat()}\n\n")
-                    
-                    f.write("RESUMEN ESTADÍSTICO:\n")
-                    f.write(f"Total original de mismatches: {len(original)}\n")
-                    f.write(f"Total generado de mismatches: {len(generated)}\n")
-                    f.write(f"Faltantes: {len(missing)} partes ({missing_pct:.2f}%)\n")
-                    f.write(f"Extras: {len(extra)} partes ({extra_pct:.2f}%)\n")
-                    f.write(f"Discrepancia total: {total_discrepancy_pct:.2f}%\n\n")
-                    
-                    f.write("PARTES FALTANTES:\n")
-                    for part in sorted(missing):
-                        f.write(f"- {part}\n")
-                        
-                    f.write("\nPARTES EXTRAS:\n")
-                    for part in sorted(extra):
-                        f.write(f"- {part}\n")
-                
-                logger.info(f"Detalles de discrepancias guardados en: {file_path}")
-                
-        except Exception as e:
-            logger.error(f"Error al analizar discrepancias: {str(e)}")
-            # No propagar la excepción para evitar interrupciones

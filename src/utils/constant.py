@@ -27,9 +27,6 @@ AUDIT_STATUS = {
 
 """Constantes para el sistema de logging"""
 
-# Rutas de directorios
-LOGS_DIR = "logs"
-
 # Formato de logging
 LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'

@@ -34,7 +34,6 @@ class SerialControlInfo:
     current_value: str  # El valor actual ("Dynamic entry", "No serial control", "Not found")
     is_active: bool    # Si el control de serie está activo
     last_updated: datetime = field(default_factory=datetime.now)
-    history: List[str] = field(default_factory=list)  # Para rastrear cambios
     
     @property
     def is_valid(self) -> bool:
