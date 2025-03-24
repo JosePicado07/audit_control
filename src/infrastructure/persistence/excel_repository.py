@@ -1,5 +1,7 @@
 import re
+import time
 import traceback
+import duckdb
 import pandas as pd
 from typing import Dict, List, Optional, Any, Union
 from pathlib import Path
@@ -13,6 +15,7 @@ from functools import lru_cache
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
 import warnings
+import polars as pl
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -143,6 +146,57 @@ class ExcelRepository:
             logger.error(f"Error checking if file is inventory: {str(e)}")
             return False
         
+    def _read_with_polars_simple(self, file_path: Path, is_inventory: bool = False, sheet_name: Optional[str] = None) -> pd.DataFrame:
+        """
+        Lee archivos Excel con Polars usando la estructura exacta de tus archivos:
+        - Primera fila: título (se salta)
+        - Segunda fila: nombres de columnas
+        - Resto: datos
+        """
+        
+        print(f"Leyendo archivo con Polars (versión simple): {file_path}")
+        start_time = time.time()
+        
+        try:
+            # 1. Identificar la hoja a usar
+            if sheet_name is None:
+                import pandas as pd
+                xl = pd.ExcelFile(file_path)
+                sheets = xl.sheet_names
+                sheet_name = sheets[0] if sheets else None
+                print(f"Usando primera hoja: {sheet_name}")
+            
+            # 2. Leer con Polars saltando la primera fila (título)
+            # El parámetro clave: skip_rows=1
+            df_pl = pl.read_excel(
+            file_path,
+            sheet_name=sheet_name,
+            read_options={"skip_rows": 1, "header_row": 1}  # Argumento correcto en Polars 1.26
+        )
+
+            
+            # 3. Convertir a Pandas para compatibilidad con código existente
+            df_pd = df_pl.to_pandas()
+            
+            # 4. Normalizar nombres de columnas exactamente igual que antes
+            df_pd.columns = [
+                str(col).strip().upper().replace('\n', '').replace('\r', '')
+                .replace('\t', '').replace('  ', ' ')
+                for col in df_pd.columns
+            ]
+            
+            # 5. Eliminar columnas sin nombre igual que antes
+            df_pd = df_pd.loc[:, ~df_pd.columns.str.contains('^Unnamed:', na=False)]
+            
+            elapsed = time.time() - start_time
+            print(f"Archivo leído con Polars en {elapsed:.2f} segundos (vs ~57s con Pandas)")
+            
+            return df_pd
+            
+        except Exception as e:
+            print(f"Error leyendo con Polars: {str(e)}")
+            return None
+            
     def read_excel_file(
         self, 
         file_path: Path,
@@ -150,43 +204,56 @@ class ExcelRepository:
         sheet_name: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Read Excel file with consistent handling.
+        Lee archivos Excel con Polars o cae a Pandas si es necesario.
         """
         try:
             logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
-
-            # Configure read options - siempre saltamos la primera fila que es el título
+            
+            # Intentar con Polars primero
+            polars_df = self._read_with_polars_simple(
+                file_path, 
+                is_inventory=is_inventory,
+                sheet_name=sheet_name
+            )
+            
+            if polars_df is not None:
+                return polars_df
+                
+            # Si Polars falla, usar método tradicional con Pandas
+            logger.debug("Fallback a método tradicional con Pandas")
+            
+            # El resto del código original con Pandas...
             options = {
                 'engine': 'openpyxl',
                 'skiprows': 1  # Siempre saltamos la primera fila (título)
             }
-
+            
             # First check if file has multiple sheets
             xl = pd.ExcelFile(file_path)
             sheets = xl.sheet_names
-
+            
             # If sheet_name not provided, use first sheet
             if not sheet_name and len(sheets) > 0:
                 sheet_name = sheets[0]
-
+                
             options['sheet_name'] = sheet_name
-
+            
             # Read the file
             df = pd.read_excel(file_path, **options)
-
+            
             # If multiple sheets were returned, use the first one
             if isinstance(df, dict):
                 sheet_name = list(df.keys())[0]
                 df = df[sheet_name]
-
+                
             # Normalize columns
             df = self._normalize_columns(df)
-
+            
             # Eliminar columnas sin nombre
             df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
-
+            
             return df
-
+                
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {str(e)}")
             raise
@@ -600,18 +667,19 @@ class ExcelRepository:
         """Ensure cleanup on destruction."""
         self.cleanup()
         
-    def read_inventory_file(self, file_path: Path) -> pd.DataFrame:
-        """Read and normalize inventory file."""
+    def read_inventory_file(self, file_path: Path, sheet_name: Optional[str] = None) -> pd.DataFrame:
+        """
+        Lee y normaliza archivo de inventario explícitamente.
+        """
         try:
             logger.info(f"Reading inventory file: {file_path}")
             
-            if not self._is_inventory_file(file_path):
-                raise ValueError("Not a valid inventory file format")
-            
-            # Usar read_excel_file para mantener la consistencia
-            df = self.read_excel_file(file_path, is_inventory=True)
-            
-            return df
+            # Usar el método general con flag explícito de inventario
+            return self.read_excel_file(
+                file_path, 
+                is_inventory=True,  # CLAVE: Forzar modo inventario
+                sheet_name=sheet_name
+            )
                 
         except Exception as e:
             logger.error(f"Error reading inventory file: {str(e)}")
