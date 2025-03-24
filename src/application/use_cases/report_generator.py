@@ -201,7 +201,7 @@ class ReportGenerator:
         try:
             # DEBUG: Imprimir contenido de serial_results
             contract_name = program_requirements.get('contract', 'Unknown')
-            contract_name = contract_name.replace(' ', '_')  # Reemplazar espacios por guiones bajos
+            contract_name = self._sanitize_filename(contract_name)
             excel_path = self.output_dir / f"serial_control_validation_{contract_name}_{timestamp}.xlsx"
             
             # CORRECCIÓN: Usar la lista exacta de 72 organizaciones físicas proporcionada
@@ -341,7 +341,7 @@ class ReportGenerator:
     def _generate_internal_report(self, audit_result: AuditResult, validation_results: Dict, timestamp: str, inventory_validation_enabled: bool = True) -> Path:
         try:
             contract_name = validation_results.get('program_requirements', {}).get('contract', 'Unknown')
-            contract_name = contract_name.replace(' ', '_')  # Reemplazar espacios por guiones bajos
+            contract_name = self._sanitize_filename(contract_name)
             excel_path = self.output_dir / f"organization_validation_report_{contract_name}_{timestamp}.xlsx"
             org_destination = validation_results.get('program_requirements', {}).get('org_destination', [])
 
@@ -1910,4 +1910,16 @@ class ReportGenerator:
             logger.warning(f"Ejemplos de partes extras: {extra_examples}")
             if len(extra) > max_examples:
                 logger.warning(f"... y {len(extra) - max_examples} más")
-                
+    
+    def _sanitize_filename(self, name: str) -> str:
+        """Sanitiza un nombre para que sea válido como nombre de archivo y lo convierte a mayúsculas."""
+        # Reemplazar caracteres inválidos para nombres de archivo
+        invalid_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|']
+        result = name
+        for char in invalid_chars:
+            result = result.replace(char, '-')
+        # Reemplazar espacios por guiones bajos
+        result = result.replace(' ', '_')
+        # Convertir a mayúsculas
+        result = result.upper()
+        return result
