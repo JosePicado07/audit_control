@@ -1,0 +1,44 @@
+=== DETAILED PERFORMANCE REPORT ===
+
+Audit File: C:\Users\picadocj\Desktop\wwt_gah_direct_scheduleable MERCK AUDIT.xlsx
+Contract: MERCK
+Date/Time: 2025-03-24 11:15:21
+
+🔹 PROCESSING WITHOUT INVENTORY
+- Total Time: 69.61 seconds
+- Memory Used: 463.57 MB
+
+Step-by-Step Analysis (Without Inventory):
+- Lectura del archivo: 15.07s, 414.30 MB
+- Obtener requisitos del programa: 0.40s, 1.82 MB
+- Auditoría de Serial Control: 42.51s, 0.00 MB
+- Auditoría de Organization Mismatch: 11.38s, 28.19 MB
+- Auditoría de otros atributos: 0.10s, 0.00 MB
+- Combinar resultados: 0.14s, 19.26 MB
+
+Bottleneck (Without Inventory):
+- Slowest Step: Auditoría de Serial Control (42.51s)
+- Highest Memory Step: Lectura del archivo (414.30 MB)
+
+🔹 PROCESSING WITH INVENTORY
+- Total Time: 36.85 seconds
+- Memory Used: 266.61 MB
+
+Step-by-Step Analysis (With Inventory):
+- Lectura del archivo: 11.58s, 242.52 MB
+- Obtener requisitos del programa: 0.35s, 0.91 MB
+- Lectura de archivo de inventario: 0.26s, 0.00 MB
+- Auditoría de Serial Control: 13.57s, 0.00 MB
+- Auditoría de Organization Mismatch: 10.84s, 3.11 MB
+- Auditoría de otros atributos: 0.10s, 0.00 MB
+- Combinar resultados: 0.15s, 20.07 MB
+
+Bottleneck (With Inventory):
+- Slowest Step: Auditoría de Serial Control (13.57s)
+- Highest Memory Step: Lectura del archivo (242.52 MB)
+
+🔹 PERFORMANCE COMPARISON
+Time Difference:
+- Temporal Variation: 32.76 seconds
+Memory Difference:
+- Memory Variation: 196.95 MB

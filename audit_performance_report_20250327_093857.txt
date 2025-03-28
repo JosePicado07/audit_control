@@ -1,0 +1,44 @@
+=== DETAILED PERFORMANCE REPORT ===
+
+Audit File: C:\Users\picadocj\Desktop\Trial files\wwt_gah_direct_scheduleable - 2025-03-05T114029.215.xlsx
+Contract: VES
+Date/Time: 2025-03-27 09:38:57
+
+🔹 PROCESSING WITHOUT INVENTORY
+- Total Time: 441.67 seconds
+- Memory Used: 1582.90 MB
+
+Step-by-Step Analysis (Without Inventory):
+- Lectura del archivo: 26.34s, 1449.73 MB
+- Obtener requisitos del programa: 0.51s, 6.25 MB
+- Auditoría de Serial Control: 65.34s, 0.00 MB
+- Auditoría de Organization Mismatch: 349.19s, 68.91 MB
+- Auditoría de otros atributos: 0.10s, 0.00 MB
+- Combinar resultados: 0.19s, 58.01 MB
+
+Bottleneck (Without Inventory):
+- Slowest Step: Auditoría de Organization Mismatch (349.19s)
+- Highest Memory Step: Lectura del archivo (1449.73 MB)
+
+🔹 PROCESSING WITH INVENTORY
+- Total Time: 493.08 seconds
+- Memory Used: 609.46 MB
+
+Step-by-Step Analysis (With Inventory):
+- Lectura del archivo: 0.20s, 182.28 MB
+- Obtener requisitos del programa: 0.39s, 0.00 MB
+- Lectura de archivo de inventario: 2.00s, 0.00 MB
+- Auditoría de Serial Control: 123.28s, 370.37 MB
+- Auditoría de Organization Mismatch: 366.89s, 0.00 MB
+- Auditoría de otros atributos: 0.10s, 0.00 MB
+- Combinar resultados: 0.22s, 56.81 MB
+
+Bottleneck (With Inventory):
+- Slowest Step: Auditoría de Organization Mismatch (366.89s)
+- Highest Memory Step: Auditoría de Serial Control (370.37 MB)
+
+🔹 PERFORMANCE COMPARISON
+Time Difference:
+- Temporal Variation: 51.41 seconds
+Memory Difference:
+- Memory Variation: 973.43 MB

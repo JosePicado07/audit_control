@@ -49,28 +49,31 @@ class AuditService:
                 logger.debug("Checking if file is inventory format...")
                 is_inventory = self.excel_repository._is_inventory_file(Path(file_path))
             
-            # Validate files based on their type
-            if is_inventory:
-                logger.debug("Validating main file as inventory file...")
-                self.excel_repository.validate_inventory_file(file_path)
-            else:
-                logger.debug("Validating main file as audit file...")
-                self.excel_repository.validate_input_file(file_path)
+            # Validar y leer archivos con el nuevo método que usa caché
+            logger.debug(f"Validating and reading {'inventory' if is_inventory else 'audit'} file...")
+            main_df = self.excel_repository.validate_and_read_file(
+                file_path, 
+                is_inventory=is_inventory
+            )
             
-            # Validate inventory file if provided
+            # Validar y leer archivo de inventario si existe
+            inventory_df = None
             if inventory_file:
-                logger.debug("Validating inventory file...")
-                self.excel_repository.validate_inventory_file(inventory_file)
-                
+                logger.debug("Validating and reading inventory file...")
+                inventory_df = self.excel_repository.validate_and_read_file(
+                    inventory_file, 
+                    is_inventory=True
+                )
+                    
             # Get program requirements
             logger.debug("Getting program requirements...")
             program_requirements_dict = self.excel_repository.get_program_requirements(contract)
             
-            # Infer org_destination if not present
+            # Infer org_destination if not present - usar el DataFrame ya cargado
             if not program_requirements_dict.get('org_destination'):
-                df = pd.read_excel(file_path)
+                # Ya tenemos main_df cargado, no necesitamos leer de nuevo
                 inferred_orgs = sorted(list(set(str(org).strip().zfill(2)
-                                                for org in df['Organization'].unique())))
+                                                for org in main_df['ORGANIZATION'].unique())))
                 program_requirements_dict['org_destination'] = inferred_orgs
                 logger.info(f"Inferred org_destination: {inferred_orgs}")
             
@@ -79,9 +82,7 @@ class AuditService:
                 program_requirements_dict['base_org'] = program_requirements_dict['org_destination'][0]
                 logger.warning(f"Base org not found - using first org in org_destination: {program_requirements_dict['base_org']}")
                 
-            
-            
-             # Convert dict to ProgramRequirement object
+            # Convert dict to ProgramRequirement object
             program_requirements = ProgramRequirement(
                 contract=contract,
                 base_org=program_requirements_dict.get('base_org', ''),
@@ -93,12 +94,12 @@ class AuditService:
             )
             
             logger.debug("Processing audit...")
+            # Ahora el processor obtendrá los DataFrames del caché
             audit_result = self.audit_processor.process_audit(
                 file_path, 
                 contract,
                 inventory_file=inventory_file
             )
-
             # Validar audit_result
             if audit_result is None:
                 raise ValueError("Audit processing failed - no results returned")

@@ -1,3 +1,4 @@
+from functools import lru_cache
 import re
 import traceback
 from typing import Dict, Set, Optional, List
@@ -12,7 +13,7 @@ from domain.entities.inventory_entity import InventoryAgingInfo, InventoryMatch
 
 logger = logging.getLogger(__name__)
 
-
+@lru_cache(maxsize=10000)
 class InventoryMatcher:
     """Efficient inventory matching system optimized for large datasets"""
     

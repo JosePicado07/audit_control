@@ -32,7 +32,7 @@ class AuditProfiler:
         
         try:
             # Logging del método a probar
-            self.logger.info(f"🔍 Perfilando método: {func.__name__}")
+            self.logger.info(f"Perfilando método: {func.__name__}")
             
             # Múltiples mediciones de memoria inicial
             process = psutil.Process()
@@ -69,12 +69,12 @@ class AuditProfiler:
             ps.print_stats(30)  # Mostrar las 30 funciones que más tiempo consumen
             
             # Logging detallado
-            self.logger.info(f"📊 Resultados de {func.__name__}:")
-            self.logger.info(f"⏱️ Tiempo total: {end_time - start_time:.2f} segundos")
-            self.logger.info(f"💻 Uso de CPU: {cpu_percent_end - cpu_percent_start:.2f}%")
-            self.logger.info(f"🧠 Memoria inicial: {memory_before:.2f} MB")
-            self.logger.info(f"🧠 Memoria final: {memory_after:.2f} MB")
-            self.logger.info(f"🧠 Memoria usada: {memory_used:.2f} MB")
+            self.logger.info(f" Resultados de {func.__name__}:")
+            self.logger.info(f"Tiempo total: {end_time - start_time:.2f} segundos")
+            self.logger.info(f" Uso de CPU: {cpu_percent_end - cpu_percent_start:.2f}%")
+            self.logger.info(f" Memoria inicial: {memory_before:.2f} MB")
+            self.logger.info(f" Memoria final: {memory_after:.2f} MB")
+            self.logger.info(f"Memoria usada: {memory_used:.2f} MB")
             
             return {
                 'result': result,
@@ -89,22 +89,28 @@ class AuditProfiler:
             }
         
         except Exception as e:
-            self.logger.error(f"❌ Error en profiling del método {func.__name__}: {e}")
+            self.logger.error(f" Error en profiling del método {func.__name__}: {e}")
             self.logger.error(traceback.format_exc())
             raise
 
-    def profile_steps(self, processor, file_path: str, contract: str) -> Dict:
+    def profile_steps(
+        self, 
+        processor, 
+        file_path: str, 
+        contract: str, 
+        inventory_file: Optional[str] = None
+    ) -> Dict:
         """
-        Análisis paso a paso del proceso de auditoría
+        Análisis paso a paso del proceso de auditoría con soporte de inventario
         """
-        self.logger.info("🔍 Iniciando análisis paso a paso")
+        self.logger.info("Iniciando análisis paso a paso")
         
         results = []
         repository = processor.repository
         
         try:
             # 1. Lectura del archivo
-            self.logger.info("📄 Perfilando lectura del archivo...")
+            self.logger.info("Perfilando lectura del archivo...")
             read_profile = self.profile_function(processor._read_audit_file, file_path)
             df = read_profile['result']
             results.append({
@@ -114,7 +120,7 @@ class AuditProfiler:
             })
             
             # 2. Obtener requisitos del programa
-            self.logger.info("📋 Perfilando obtención de requisitos del programa...")
+            self.logger.info(" Perfilando obtención de requisitos del programa...")
             reqs_profile = self.profile_function(repository.get_program_requirements, contract)
             program_reqs = reqs_profile['result']
             results.append({
@@ -123,9 +129,29 @@ class AuditProfiler:
                 'memory_mb': reqs_profile['memory_used_mb']
             })
             
-            # 3. Auditoría de Serial Control
+            # 3. Procesamiento de archivo de inventario (si está presente)
+            if inventory_file:
+                self.logger.info(" Perfilando lectura de archivo de inventario...")
+                inventory_read_profile = self.profile_function(
+                    processor._read_inventory_file, 
+                    inventory_file
+                )
+                inventory_df = inventory_read_profile['result']
+                results.append({
+                    'step': 'Lectura de archivo de inventario',
+                    'time': inventory_read_profile['total_time'],
+                    'memory_mb': inventory_read_profile['memory_used_mb']
+                })
+            
+            # 4. Auditoría de Serial Control
             self.logger.info("🔍 Perfilando auditoría de Serial Control...")
-            serial_profile = self.profile_function(processor._process_serial_control_audit, df, program_reqs)
+            # Pasar inventory_df si está disponible
+            serial_profile = self.profile_function(
+                processor._process_serial_control_audit, 
+                df, 
+                program_reqs, 
+                inventory_df if inventory_file else None
+            )
             results.append({
                 'step': 'Auditoría de Serial Control',
                 'time': serial_profile['total_time'],
@@ -133,7 +159,7 @@ class AuditProfiler:
             })
             
             # 4. Auditoría de Organization Mismatch
-            self.logger.info("🏢 Perfilando auditoría de Organization Mismatch...")
+            self.logger.info(" Perfilando auditoría de Organization Mismatch...")
             org_profile = self.profile_function(processor._process_org_mismatch_audit, df, program_reqs)
             results.append({
                 'step': 'Auditoría de Organization Mismatch',
@@ -142,7 +168,7 @@ class AuditProfiler:
             })
             
             # 5. Auditoría de otros atributos
-            self.logger.info("🔍 Perfilando auditoría de otros atributos...")
+            self.logger.info(" Perfilando auditoría de otros atributos...")
             other_profile = self.profile_function(processor._process_other_attributes_audit, df, program_reqs)
             results.append({
                 'step': 'Auditoría de otros atributos',
@@ -150,8 +176,10 @@ class AuditProfiler:
                 'memory_mb': other_profile['memory_used_mb']
             })
             
+            
+            
             # 6. Combinar resultados de auditoría
-            self.logger.info("🔄 Perfilando combinación de resultados...")
+            self.logger.info(" Perfilando combinación de resultados...")
             combined_df = self.profile_function(
                 processor._combine_audit_results,
                 serial_profile['result']['data'],
@@ -183,15 +211,15 @@ class AuditProfiler:
             self.logger.error(traceback.format_exc())
             raise
 
-    def analyze_process_steps(self, processor, file_path: str, contract: str) -> Dict:
+    def analyze_process_steps(self, processor, file_path: str, contract: str,inventory_file: Optional[str]) -> Dict:
         """
         Análisis por pasos SIN ejecutar el proceso completo
         """
-        self.logger.info("🚀 Iniciando análisis detallado por pasos")
+        self.logger.info(" Iniciando análisis detallado por pasos")
         
         try:
             # Ejecutar solo el análisis paso a paso para evitar la doble ejecución
-            steps_profile = self.profile_steps(processor, file_path, contract)
+            steps_profile = self.profile_steps(processor, file_path, contract, inventory_file)
             
             # Generar informe consolidado
             report = {
@@ -206,9 +234,9 @@ class AuditProfiler:
             }
             
             # Logging de resultados principales
-            self.logger.info(f"⏱️ Tiempo total (suma de pasos): {report['full_profile']['total_time']:.2f} segundos")
-            self.logger.info(f"🧠 Memoria total (suma de pasos): {report['full_profile']['memory_used_mb']:.2f} MB")
-            self.logger.info(f"🔍 Paso más lento: {steps_profile['bottleneck']['time']['step']} ({steps_profile['bottleneck']['time']['time']:.2f}s)")
+            self.logger.info(f" Tiempo total (suma de pasos): {report['full_profile']['total_time']:.2f} segundos")
+            self.logger.info(f" Memoria total (suma de pasos): {report['full_profile']['memory_used_mb']:.2f} MB")
+            self.logger.info(f" Paso más lento: {steps_profile['bottleneck']['time']['step']} ({steps_profile['bottleneck']['time']['time']:.2f}s)")
             
             return report
         
@@ -217,31 +245,38 @@ class AuditProfiler:
             self.logger.error(traceback.format_exc())
             raise
 
-    def comprehensive_audit_profile(self, processor, file_path: str, contract: str, only_steps: bool = True) -> Dict:
+    def comprehensive_audit_profile(
+        self, 
+        processor, 
+        file_path: str, 
+        contract: str, 
+        inventory_file: Optional[str] = None, 
+        only_steps: bool = True
+    ) -> Dict:
         """
-        Análisis completo y optimizado del proceso de auditoría
-        
-        Args:
-            processor: Instancia de AuditProcessor
-            file_path: Ruta al archivo a analizar
-            contract: Nombre del contrato
-            only_steps: Si es True, solo ejecuta el análisis paso a paso (evita doble ejecución)
+        Análisis completo y optimizado del proceso de auditoría con soporte opcional de inventario
         """
-        self.logger.info("🚀 Iniciando análisis completo de rendimiento")
+        self.logger.info(" Iniciando análisis completo de rendimiento")
         
         try:
+            # Si se proporciona inventario, modificar la llamada a process_audit
+            if inventory_file:
+                process_method = lambda: processor.process_audit(file_path, contract, inventory_file=inventory_file)
+            else:
+                process_method = lambda: processor.process_audit(file_path, contract)
+
             if only_steps:
                 # Ejecutar solo el análisis paso a paso
-                return self.analyze_process_steps(processor, file_path, contract)
+                return self.analyze_process_steps(processor, file_path, contract, inventory_file)
             else:
                 # Ejecutar análisis completo + paso a paso (doble ejecución)
                 # 1. Perfil del proceso completo
-                self.logger.info("⏱️ Perfilando proceso de auditoría completo...")
-                full_profile = self.profile_function(processor.process_audit, file_path, contract)
+                self.logger.info(" Perfilando proceso de auditoría completo...")
+                full_profile = self.profile_function(process_method)
                 
                 # 2. Análisis paso a paso
-                self.logger.info("🔍 Realizando análisis paso a paso...")
-                steps_profile = self.profile_steps(processor, file_path, contract)
+                self.logger.info(" Realizando análisis paso a paso...")
+                steps_profile = self.profile_steps(processor, file_path, contract, inventory_file)
                 
                 # 3. Extraer los 5 cuellos de botella principales - CORREGIDO
                 s = io.StringIO()
@@ -268,10 +303,10 @@ class AuditProfiler:
                 }
                 
                 # Logging de resultados principales
-                self.logger.info(f"⏱️ Tiempo total: {report['full_profile']['total_time']:.2f} segundos")
-                self.logger.info(f"💻 Uso de CPU: {report['full_profile']['cpu_percent']:.1f}%")
-                self.logger.info(f"🧠 Memoria usada: {report['full_profile']['memory_used_mb']:.2f} MB")
-                self.logger.info(f"🔍 Paso más lento: {steps_profile['bottleneck']['time']['step']} ({steps_profile['bottleneck']['time']['time']:.2f}s)")
+                self.logger.info(f"Tiempo total: {report['full_profile']['total_time']:.2f} segundos")
+                self.logger.info(f" Uso de CPU: {report['full_profile']['cpu_percent']:.1f}%")
+                self.logger.info(f" Memoria usada: {report['full_profile']['memory_used_mb']:.2f} MB")
+                self.logger.info(f" Paso más lento: {steps_profile['bottleneck']['time']['step']} ({steps_profile['bottleneck']['time']['time']:.2f}s)")
                 
                 return report
         
