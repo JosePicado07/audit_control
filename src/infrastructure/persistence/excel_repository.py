@@ -106,41 +106,54 @@ class ExcelRepository:
             self._validate_environment()
 
 
-    def _normalize_columns(self, df):
+    def _normalize_column_name(self, col_name: str) -> str:
         """
-        Método universal robusto para normalización de columnas
-        Soporta Pandas, Polars y manejo de tipos mixtos
-        """
-        def clean_column_name(col):
-            """Función de limpieza universal"""
-            return (str(col)
-                    .strip()
-                    .replace('\n', '')
-                    .replace('\r', '')
-                    .replace('\t', '')
-                    .replace('  ', ' ')
-                    .upper())
+        Normaliza un único nombre de columna.
         
-        # Detección de tipo de DataFrame
+        Args:
+            col_name: Nombre de columna a normalizar
+            
+        Returns:
+            Nombre de columna normalizado
+        """
+        if not isinstance(col_name, str):
+            col_name = str(col_name)
+            
+        return (col_name
+                .strip()
+                .replace('\n', '')
+                .replace('\r', '')
+                .replace('\t', '')
+                .replace('  ', ' ')
+                .upper())
+
+    def _normalize_columns(self, df: Union[pd.DataFrame, pl.DataFrame, pl.LazyFrame]) -> Union[pd.DataFrame, pl.DataFrame, pl.LazyFrame]:
+        """
+        Normaliza todas las columnas de un DataFrame.
+        
+        Args:
+            df: DataFrame (pandas o polars) a normalizar
+            
+        Returns:
+            DataFrame con columnas normalizadas
+        """
+        import polars as pl
+        
         if isinstance(df, pl.DataFrame):
-            # Polars específico - conversión segura
             return df.rename({
-                col: clean_column_name(col) 
+                col: self._normalize_column_name(col) 
                 for col in df.columns
             })
         elif isinstance(df, pd.DataFrame):
-            # Pandas - normalización tradicional
-            df.columns = [clean_column_name(col) for col in df.columns]
+            df.columns = [self._normalize_column_name(col) for col in df.columns]
             return df
         elif isinstance(df, pl.LazyFrame):
-            # LazyFrame requiere un tratamiento especial
             return df.rename({
-                col: clean_column_name(col) 
+                col: self._normalize_column_name(col) 
                 for col in df.columns
             })
         else:
-            # Fallback para tipos desconocidos
-            print(f"Tipo de DataFrame no reconocido: {type(df)}")
+            logger.warning(f"Tipo de DataFrame no reconocido: {type(df)}")
             return df
         
     
@@ -342,7 +355,6 @@ class ExcelRepository:
             # Para archivos grandes o inventario, usar enfoque optimizado
             if file_size_mb > 30 or is_inventory:
                 try:
-                    import polars as pl
                     logger.info(f"Usando Polars para lectura optimizada")
                     
                     # Leer con Polars
@@ -354,7 +366,7 @@ class ExcelRepository:
                     
                     # Normalizar columnas
                     df_pl = df_pl.rename({
-                        col: self._normalize_columns(col) 
+                        col: self._normalize_column_name(col) 
                         for col in df_pl.columns
                     })
                     
@@ -369,7 +381,7 @@ class ExcelRepository:
             
             # Normalizar columnas en caso de pandas
             if isinstance(df, pd.DataFrame):
-                df.columns = [self._normalize_columns(col) for col in df.columns]
+                df.columns = [self._normalize_column_name(col) for col in df.columns]
                 
                 # Eliminar columnas sin nombre
                 df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
@@ -571,16 +583,20 @@ class ExcelRepository:
         all_missing = set(self.audit_required_columns.keys()) - set(df.columns)
         if all_missing - missing_critical:
             logger.warning(f"Columnas no críticas faltantes en archivo de auditoría: {all_missing - missing_critical}")
-
+            
     def _validate_inventory_columns(self, df: pd.DataFrame) -> None:
         """Valida las columnas requeridas para archivos de inventario."""
-        # Verificar columnas requeridas - Convertir todas las columnas a string primero
-        df_columns = set(str(col).upper() for col in df.columns)
-        required_columns = set(col.upper() for col in self.inventory_required_columns.keys())
+        # Normalizar nombres de columnas para comparación más flexible
+        df_columns = {self._normalize_column_name(col) for col in df.columns}
+        required_columns = {self._normalize_column_name(col) for col in self.inventory_required_columns.keys()}
+        
+        # Para debug, mostrar columnas disponibles
+        logger.debug(f"Columnas en archivo: {sorted(df_columns)}")
+        logger.debug(f"Columnas requeridas: {sorted(required_columns)}")
         
         missing_columns = required_columns - df_columns
         if missing_columns:
-            raise ValueError(f"Inventory file missing required columns: {missing_columns}")
+            raise ValueError(f"Inventory file missing critical columns: {missing_columns}")
         
     def save_excel_file(self, df: pd.DataFrame, file_path: Path) -> None:
         """
