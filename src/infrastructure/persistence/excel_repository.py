@@ -1,4 +1,5 @@
 import re
+import time
 import traceback
 import pandas as pd
 from typing import Dict, List, Optional, Any, Union
@@ -8,8 +9,7 @@ import logging
 from application.use_cases.inventory.inventory_columns import InventoryColumns
 from utils.constant import EXCEL_EXTENSIONS
 import os
-import json
-from functools import lru_cache
+import tempfile
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
 import warnings
@@ -107,6 +107,18 @@ class ExcelRepository:
                             .str.upper()
         return df
     
+    def _get_memory_usage(self, df: pd.DataFrame) -> float:
+        """
+        Calcula el uso de memoria de un DataFrame en MB
+        
+        Args:
+            df: DataFrame a analizar
+            
+        Returns:
+            Uso de memoria en MB
+        """
+        return df.memory_usage(deep=True).sum() / 1024 / 1024
+    
     def _validate_environment(self) -> None:
         """Validate the environment setup."""
         try:
@@ -150,45 +162,181 @@ class ExcelRepository:
         sheet_name: Optional[str] = None
     ) -> pd.DataFrame:
         """
-        Read Excel file with consistent handling.
+        Lee archivos Excel con estrategia adaptativa optimizada
+        y garantiza compatibilidad con operaciones .str
+
+        Args:
+            file_path: Ruta al archivo 
+            is_inventory: Si es archivo de inventario
+            sheet_name: Nombre de hoja a leer
+            
+        Returns:
+            DataFrame con datos normalizados y compatible
         """
         try:
+            # Convertir string a Path si es necesario
+            if isinstance(file_path, str):
+                file_path = Path(file_path)
+            
             logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
+            
+            # Obtener tamaño de archivo para decisiones estratégicas
+            file_size_mb = file_path.stat().st_size / (1024 * 1024)
+            logger.debug(f"Tamaño de archivo: {file_size_mb:.2f} MB")
+            
+            # Marcar tiempo de inicio para medir rendimiento
+            start_time = time.time()
+            
+            # Lista de columnas que requieren compatibilidad con .str
+            string_columns = ['SERIAL NUMBER CONTROL', 'PART NUMBER', 'ORGANIZATION CODE', 
+                            'ITEM ORG DESTINATION', 'DESCRIPTION', 'CONTRACT', 'MFG PART NUM',
+                            'CUSTOMER ID', 'VERTEX PRODUCT CLASS', 'FULL PART NUMBER', 
+                            'ITEM STATUS', 'PART#']
+            
+            # ESTRATEGIA 1: Archivos pequeños - Usar Pandas directo
+            if file_size_mb <= 10:
+                logger.info(f"Estrategia para archivo pequeño ({file_size_mb:.2f} MB). Usando Pandas estándar")
+                
+                # Configuración estándar
+                options = {
+                    'engine': 'openpyxl',
+                    'skiprows': 1  # Siempre saltamos la primera fila (título)
+                }
 
-            # Configure read options - siempre saltamos la primera fila que es el título
-            options = {
-                'engine': 'openpyxl',
-                'skiprows': 1  # Siempre saltamos la primera fila (título)
-            }
-
-            # First check if file has multiple sheets
-            xl = pd.ExcelFile(file_path)
-            sheets = xl.sheet_names
-
-            # If sheet_name not provided, use first sheet
-            if not sheet_name and len(sheets) > 0:
-                sheet_name = sheets[0]
-
-            options['sheet_name'] = sheet_name
-
-            # Read the file
-            df = pd.read_excel(file_path, **options)
-
-            # If multiple sheets were returned, use the first one
-            if isinstance(df, dict):
-                sheet_name = list(df.keys())[0]
-                df = df[sheet_name]
-
-            # Normalize columns
-            df = self._normalize_columns(df)
-
+                # Determinar hoja
+                xl = pd.ExcelFile(file_path)
+                sheets = xl.sheet_names
+                
+                if not sheet_name and len(sheets) > 0:
+                    sheet_name = sheets[0]
+                    
+                options['sheet_name'] = sheet_name
+                
+                # Leer archivo
+                df = pd.read_excel(file_path, **options)
+                
+                # Si se retornaron múltiples hojas, usar la primera
+                if isinstance(df, dict):
+                    sheet_name = list(df.keys())[0]
+                    df = df[sheet_name]
+                    
+            # ESTRATEGIA 2: Archivos medianos y grandes - Usar estrategia optimizada
+            else:
+                try:
+                    # Utilizar PyArrow optimizado
+                    import pyarrow as pa
+                    import pyarrow.csv as csv
+                    
+                    logger.info(f"Estrategia optimizada para archivo de {file_size_mb:.2f} MB")
+                    
+                    # Determinar hoja
+                    xl = pd.ExcelFile(file_path)
+                    sheets = xl.sheet_names
+                    
+                    if not sheet_name and len(sheets) > 0:
+                        sheet_name = sheets[0]
+                    
+                    # Generar nombre único para CSV temporal
+                    temp_id = hash(str(file_path) + str(time.time()))
+                    temp_dir = tempfile.gettempdir()  # Obtiene el directorio temporal adecuado para cada sistema
+                    temp_csv = Path(os.path.join(temp_dir, f"excel_temp_{temp_id}.csv"))
+                    
+                    # Estrategia de conversión según tamaño
+                    if file_size_mb <= 50:  # Archivos medianos
+                        # Convertir Excel a CSV de una vez
+                        temp_df = pd.read_excel(
+                            file_path, 
+                            sheet_name=sheet_name, 
+                            skiprows=1,
+                            engine='openpyxl'
+                        )
+                        temp_df.to_csv(temp_csv, index=False)
+                    else:  # Archivos grandes
+                        # Procesar por chunks
+                        chunk_size = 100000 if file_size_mb <= 100 else 50000
+                        
+                        reader = pd.read_excel(
+                            file_path,
+                            sheet_name=sheet_name,
+                            skiprows=1,
+                            chunksize=chunk_size
+                        )
+                        
+                        # Guardar chunks en CSV
+                        first_chunk = True
+                        for chunk in reader:
+                            if first_chunk:
+                                chunk.to_csv(temp_csv, index=False)
+                                first_chunk = False
+                            else:
+                                chunk.to_csv(temp_csv, mode='a', header=False, index=False)
+                    
+                    # Leer con PyArrow para máximo rendimiento
+                    read_options = csv.ReadOptions(use_threads=True)
+                    parse_options = csv.ParseOptions(delimiter=',')
+                    
+                    # Leer con PyArrow y convertir a pandas
+                    table = csv.read_csv(temp_csv, read_options=read_options, parse_options=parse_options)
+                    df = table.to_pandas()
+                    
+                    # Eliminar CSV temporal
+                    if temp_csv.exists():
+                        temp_csv.unlink()
+                        
+                except Exception as e:
+                    # Fallback a pandas estándar si PyArrow falla
+                    logger.warning(f"Estrategia optimizada falló: {str(e)}. Usando método tradicional")
+                    
+                    options = {
+                        'engine': 'openpyxl',
+                        'skiprows': 1
+                    }
+                    
+                    # Determinar hoja
+                    xl = pd.ExcelFile(file_path)
+                    sheets = xl.sheet_names
+                    
+                    if not sheet_name and len(sheets) > 0:
+                        sheet_name = sheets[0]
+                        
+                    options['sheet_name'] = sheet_name
+                    
+                    # Leer archivo
+                    df = pd.read_excel(file_path, **options)
+                    
+                    # Si se retornaron múltiples hojas, usar la primera
+                    if isinstance(df, dict):
+                        sheet_name = list(df.keys())[0]
+                        df = df[sheet_name]
+            
+            # Normalizar columnas
+            df.columns = [
+                str(col).strip().upper().replace('\n', '').replace('\r', '')
+                .replace('\t', '').replace('  ', ' ')
+                for col in df.columns
+            ]
+            
             # Eliminar columnas sin nombre
             df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
-
+            
+            # *** CORRECCIÓN CRÍTICA: Convertir solo las columnas que necesitan operaciones .str ***
+            # Identificar columnas de texto presentes en este DataFrame
+            text_cols = [col for col in string_columns if col in df.columns]
+            
+            # Convertir solo estas columnas a strings, manteniendo los tipos numéricos en otras columnas
+            for col in text_cols:
+                if col in df.columns:
+                    df[col] = df[col].fillna('').astype(str)
+            
+            # Registrar tiempo de procesamiento para análisis de rendimiento
+            elapsed_time = time.time() - start_time
+            logger.info(f"Archivo leído en {elapsed_time:.2f} segundos")
+            
             return df
-
+                
         except Exception as e:
             logger.error(f"Error reading Excel file {file_path}: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
             raise
 
     def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:

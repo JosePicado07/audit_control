@@ -1358,10 +1358,11 @@ class AuditProcessor:
             # Rename columns according to mapping
             df = df.rename(columns=column_mapping)
             
-            # Clean up data
+            # CORRECCIÓN: Limpiar y convertir tipos de datos de manera segura
             for col in df.columns:
                 if df[col].dtype == object:
-                    df[col] = df[col].fillna('').str.strip()
+                    # Convertir explícitamente a string antes de usar operaciones .str
+                    df[col] = df[col].fillna('').astype(str).str.strip()
             
             # Verify required columns are present after mapping
             required_columns = set(self._config.column_mapping.values())
