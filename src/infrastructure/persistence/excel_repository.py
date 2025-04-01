@@ -340,7 +340,7 @@ class ExcelRepository:
         # Lectura basada en tamaño y tipo
         try:
             # Estrategia para archivos grandes o de inventario
-            if file_size_mb > 10 or is_inventory:
+            if file_size_mb > 1 or is_inventory:
                 try:                    
                     # Leer con Polars
                     df_pl = pl.read_excel(

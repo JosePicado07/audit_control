@@ -78,7 +78,7 @@ class AuditView(QMainWindow):
     def initUI(self):
         # Configuración de ventana
         self.setWindowTitle("Audit Process Tool")
-        self.setGeometry(100, 100, 800, 520)
+        self.setGeometry(100, 100, 1000, 700)
         
         # Permitir redimensionamiento manteniendo FramelessWindowHint
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
@@ -636,14 +636,23 @@ class AuditView(QMainWindow):
 
     def reset_fields(self):
         """Limpia todos los campos y restablece el estado inicial"""
+        # Limpiar los campos de texto
         self.contract_input.clear()
         self.audit_file_input.clear()
         self.inventory_file_input.clear()
+        
+        # Restablecer la barra de progreso y el mensaje de estado
         self.progress_bar.setValue(0)
         self.status_label.setText("Ready to process")
+        
+        # Restablecer el checkbox
         self.use_inventory_check.setChecked(True)
         
-        # Activar controles de inventario
+        # Restablecer la información de los widgets de archivo
+        self.audit_file_info_widget.update_info("")  # Debe mostrar "No file selected"
+        self.inventory_file_info_widget.update_info("")  # Debe mostrar "No file selected"
+        
+        # Activar/desactivar controles de inventario según el estado del checkbox
         self.toggle_inventory_input()
 
     def setInputsEnabled(self, enabled):

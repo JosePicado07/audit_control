@@ -30,33 +30,24 @@ class AuditFileInfo:
         
         # Estimar número de filas basado en el tamaño y tipo
         if file_path.suffix.lower() == '.xlsx':
-            # Para archivos Excel, estimamos las filas basadas en el tamaño
-            # 1MB ~ 10,000 filas como regla general (depende del contenido)
             self.rows = int((self.filesize / (1024 * 1024)) * 10000)
-            # Si el archivo es pequeño, asegurar un mínimo
             self.rows = max(self.rows, 100)
-            
-            # Estimar columnas
-            self.columns = 20  # Valor típico para archivos de auditoría
-            
+            self.columns = 20
         else:
-            # Para otros tipos de archivo, usar una estimación genérica
-            self.rows = int(self.filesize / 100)  # Aproximación muy básica
+            self.rows = int(self.filesize / 100)
             self.columns = 10
         
         # Estimar tiempo de procesamiento
-        # Basado en benchmarks: ~10,000 filas/segundo en máquina promedio
-        processing_speed = 10000  # filas por segundo
-        
-        # Cálculo base de tiempo de procesamiento
+        processing_speed = 500  # Ajustado a 500 filas/segundo según tiempo real
         base_time = self.rows / processing_speed
         
         # Factores de ajuste
-        size_factor = 1.0 + (self.filesize / (1024 * 1024 * 100))  # Ajuste por tamaño (MB)
-        column_factor = 1.0 + (self.columns / 50)  # Ajuste por columnas
+        size_factor = 1.0 + (self.filesize / (1024 * 1024 * 100))
+        column_factor = 1.0 + (self.columns / 50)
+        safety_factor = 1.5  # Factor de seguridad para variaciones
         
         # Tiempo estimado final (con un mínimo razonable)
-        self.estimated_time = max(5, base_time * size_factor * column_factor)
+        self.estimated_time = max(5, base_time * size_factor * column_factor * safety_factor)
     
     def get_size_str(self) -> str:
         """Devuelve tamaño del archivo en formato legible"""
