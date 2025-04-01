@@ -1,492 +1,734 @@
-# Standard library imports
-import threading
-import time
-import traceback
-from pathlib import Path
-from typing import Optional
 import os
-from concurrent.futures import ThreadPoolExecutor
-import pandas as pd
+import sys
+from pathlib import Path
+import traceback
+from typing import Optional
 
-# Third-party imports
-import customtkinter as ctk
-from PIL import Image
-from tkinter import messagebox, filedialog
+from PyQt6 import QtCore
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QFileDialog,
+    QProgressBar, QCheckBox, QApplication, QSizePolicy,
+    QGraphicsDropShadowEffect, QSpacerItem
+)
+from PyQt6.QtCore import (
+    Qt, QThread, pyqtSignal, QPropertyAnimation, 
+    QEasingCurve, QPoint, QSize
+)
+from PyQt6.QtGui import QFont, QPalette, QColor, QIcon
 
-# Local application imports
-from application.use_cases.audit_processor import AuditProcessor
-from application.use_cases.report_generator import ReportGenerator
-from infrastructure.logging.logger import get_logger
-from infrastructure.persistence.excel_repository import ExcelRepository
 from presentation.controllers.audit_controller import AuditController
-from application.services.audit_service import AuditService
+from presentation.views.audit_file import FileInfoWidget
 
-# Initialize logger
-logger = get_logger(__name__)
+class AuditWorker(QThread):
+    """Trabajador para procesar auditoría en segundo plano"""
+    progress_update = pyqtSignal(int, str)
+    audit_completed = pyqtSignal(dict)
+    audit_error = pyqtSignal(Exception)
 
-class AuditView:
+    def __init__(self, controller, contract, file_path, inventory_path=None, use_inventory=True):
+        super().__init__()
+        self.controller = controller
+        self.contract = contract
+        self.file_path = file_path
+        self.inventory_path = inventory_path
+        self.use_inventory = use_inventory
+
+    def run(self):
+        try:
+            result = self.controller.process_audit(
+                self.contract,
+                self.file_path,
+                inventory_file=self.inventory_path,
+                use_inventory=self.use_inventory,
+                progress_callback=self.update_progress
+            )
+            self.audit_completed.emit(result)
+        except Exception as e:
+            self.audit_error.emit(e)
+
+    def update_progress(self, progress, message):
+        self.progress_update.emit(int(progress * 100), message)
+
+
+class AuditView(QMainWindow):
     def __init__(self, controller: Optional[AuditController] = None):
-        """Initialize the audit view"""
-        logger.debug("Initializing AuditView")
-        self.root= ctk.CTk()
-        self.use_inventory_var = ctk.BooleanVar(value=True)
-        self.controller = controller or self._create_controller()
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        self._setup_ui()
+        super().__init__()
+        self.old_pos = None
+        self.controller = controller
+        self.worker = None
+        self.resize_mode = False
+        self.move_mode = False
+        
+        # Define color palette as class attributes
+        self.bg_color = QColor("#1A1E2E")            # Azul oscuro profundo (fondo principal)
+        self.card_bg_color = QColor("#232741")       # Fondo de tarjeta más claro
+        self.fg_color = QColor("#E2E8F0")            # Texto blanco con toque azulado
+        self.input_bg_color = QColor("#2A2F44")      # Fondo de entrada más oscuro
+        self.primary_color = QColor("#3B82F6")       # Azul vibrante (botón principal)
+        self.secondary_color = QColor("#F59E0B")     # Naranja ámbar (botón secundario)
+        self.accent_color = QColor("#10B981")        # Verde esmeralda para acentos
+        self.border_color = QColor("#374151")        # Gris azulado para bordes
+        self.error_color = QColor("#EF4444")         # Rojo para errores
+        
+        self.initUI()
 
-    def _create_controller(self) -> AuditController:
-        """Create controller with dependencies"""
-        logger.debug("Creating controller with dependencies...")
+    def initUI(self):
+        # Configuración de ventana
+        self.setWindowTitle("Audit Process Tool")
+        self.setGeometry(100, 100, 800, 520)
         
-        # Create repository
-        excel_repo = ExcelRepository()
-        logger.debug("Created ExcelRepository")
+        # Permitir redimensionamiento manteniendo FramelessWindowHint
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Create processor
-        audit_processor = AuditProcessor(
-            repository=excel_repo,
-            executor_workers=4
-        )
-        logger.debug("Created AuditProcessor")
+        # Establecer tamaños mínimos y máximos
+        self.setMinimumSize(600, 450)
+        self.setMaximumSize(1200, 800)
         
-        # Create report generator
-        report_generator = ReportGenerator()
-        logger.debug("Created ReportGenerator")
+        # Configurar paleta global
+        self.palette = QPalette()
+        self.palette.setColor(QPalette.ColorRole.Window, self.bg_color)
+        self.palette.setColor(QPalette.ColorRole.WindowText, self.fg_color)
+        self.palette.setColor(QPalette.ColorRole.Base, self.input_bg_color)
+        self.palette.setColor(QPalette.ColorRole.Text, self.fg_color)
+        self.setPalette(self.palette)
         
-        # Create service
-        audit_service = AuditService(
-            audit_processor=audit_processor,
-            report_generator=report_generator,
-            excel_repository=excel_repo
-        )
-        logger.debug("Created AuditService")
+        # Fuente principal
+        font = QFont("Segoe UI", 10)
+        self.setFont(font)
         
-        # Create and return controller
-        return AuditController(audit_service)
-
-    def _setup_ui(self) -> None:
-        """Configure the user interface"""
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        # Contenedor principal
+        main_container = QWidget()
+        main_container.setObjectName("mainContainer")
+        main_container.setStyleSheet(f"""
+            #mainContainer {{
+                background-color: {self.bg_color.name()};
+                border-radius: 12px;
+            }}
+        """)
         
-        self.root.title("Audit Process Tool")
-        self.root.geometry("900x600")
-        self.root.minsize(800,600)
+        main_layout = QVBoxLayout(main_container)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # Load icons
-        try:
-            self.folder_icon = ctk.CTkImage(
-                light_image=Image.open("src/assets/folder_light.png"),
-                dark_image=Image.open("src/assets/folder_dark.png"),
-                size=(20, 20)
-            )
-        except FileNotFoundError:
-            logger.warning("Icon files not found")
-            self.folder_icon = None
+        # ---- Barra de título personalizada ----
+        title_bar = QWidget()
+        title_bar.setFixedHeight(40)
+        title_bar_layout = QHBoxLayout(title_bar)
+        title_bar_layout.setContentsMargins(15, 0, 5, 0)
         
-        self._create_main_frame()
-        self._create_inputs()
-        self._create_buttons()
-        self._create_progress_bar()
-        self._create_status_bar()
-
-    def _create_main_frame(self) -> None:
-        """Create the main application frame"""
-        self.main_frame = ctk.CTkFrame(self.root)
-        self.main_frame.pack(padx=20, pady=20, fill="both", expand=True)
-
-
-    def _toggle_inventory(self) -> None:
-        """Handle inventory switch toggle"""
-        use_inventory = self.use_inventory_var.get()
-        if use_inventory:
-            self.inventory_frame.pack(padx=5, pady=5, fill="x")
-        else:
-            self.inventory_frame.pack_forget()
-            self.inventory_path_entry.delete(0, "end")
-
-    def _create_buttons(self) -> None:
-        """Create control buttons with better spacing and alignment"""
-        button_frame = ctk.CTkFrame(self.main_frame)
-        button_frame.pack(pady=20, fill="x", padx=20)
-
-        self.start_button = ctk.CTkButton(
-            button_frame,
-            text="Start Audit",
-            command=self.start_audit,
-            height=40,
-            width=200  # Ancho fijo para mejor apariencia
-        )
-        self.start_button.pack(side="left", padx=10)
-
-        self.clean_reports_button = ctk.CTkButton(
-            button_frame,
-            text="Reset Fields",
-            command=self._clean_reports,
-            height=40,
-            width=200,
-            fg_color="#FF8C00",  # Color naranja más atractivo
-            hover_color="#FF6B00"  # Color hover más oscuro
-        )
-        self.clean_reports_button.pack(side="right", padx=10)
+        app_icon = QLabel()
+        # Si tienes un icono, podrías cargarlo aquí
+        # app_icon.setPixmap(QIcon("icon.png").pixmap(24, 24))
+        # app_icon.setFixedSize(24, 24)
         
+        app_title = QLabel("Audit Process Tool")
+        app_title.setStyleSheet(f"color: {self.fg_color.name()}; font-size: 16px; font-weight: 600;")
         
-    def _clean_reports(self) -> None:
-        """Clean and reset input fields to start a new analysis"""
-        try:
-            # Reset UI elements
-            self.contract_entry.delete(0, "end")
-            self.file_path_entry.delete(0, "end")
-            self.inventory_path_entry.delete(0, "end")
-            self.use_inventory_var.set(True)  # Reset inventory validation to enabled
-            self.inventory_path_entry.configure(state="normal")
-            self.progress_bar.set(0)
-            self.status_label.configure(text="Ready")
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        
+        btn_minimize = QPushButton("—")
+        btn_minimize.setFixedSize(30, 30)
+        btn_minimize.clicked.connect(self.showMinimized)
+        
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(30, 30)
+        btn_close.clicked.connect(self.close)
+        
+        for btn in [btn_minimize, btn_close]:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: transparent;
+                    color: {self.fg_color.name()};
+                    border: none;
+                    font-size: 14px;
+                    border-radius: 15px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(255, 255, 255, 0.1);
+                }}
+                QPushButton:pressed {{
+                    background-color: rgba(255, 255, 255, 0.2);
+                }}
+            """)
+        
+        title_bar_layout.addWidget(app_icon)
+        title_bar_layout.addWidget(app_title)
+        title_bar_layout.addWidget(spacer)
+        title_bar_layout.addWidget(btn_minimize)
+        title_bar_layout.addWidget(btn_close)
+        
+        # ---- Tarjeta principal (contenido) ----
+        content_card = QWidget()
+        content_card.setObjectName("contentCard")
+        content_card.setStyleSheet(f"""
+            #contentCard {{
+                background-color: {self.card_bg_color.name()};
+                border-radius: 12px;
+                border: 1px solid {self.border_color.name()};
+            }}
+        """)
+        
+        # Agregar sombra a la tarjeta
+        card_shadow = QGraphicsDropShadowEffect()
+        card_shadow.setBlurRadius(20)
+        card_shadow.setColor(QColor(0, 0, 0, 60))
+        card_shadow.setOffset(0, 4)
+        content_card.setGraphicsEffect(card_shadow)
+        
+        card_layout = QVBoxLayout(content_card)
+        card_layout.setContentsMargins(25, 25, 25, 25)
+        card_layout.setSpacing(20)
+        
+        # ---- Estilos globales para controles ----
+        self.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {self.input_bg_color.name()};
+                color: {self.fg_color.name()};
+                border: 1px solid {self.border_color.name()};
+                border-radius: 6px;
+                padding: 10px 12px;
+                font-size: 14px;
+                selection-background-color: {self.primary_color.name()};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {self.primary_color.name()};
+            }}
             
-            messagebox.showinfo("Reset Complete", "All fields have been cleared. Ready for new analysis.")
-                
-        except Exception as e:
-            logger.error(f"Error resetting fields: {str(e)}")
-            messagebox.showerror("Reset Error", f"An error occurred while resetting the fields: {str(e)}")
-
-    def _create_progress_bar(self) -> None:
-        """Create progress bar"""
-        self.progress_bar = ctk.CTkProgressBar(self.main_frame)
-        self.progress_bar.pack(pady=20, fill="x", padx=10)
-        self.progress_bar.set(0)
-
-    def _create_status_bar(self) -> None:
-        """Create status bar"""
-        self.status_label = ctk.CTkLabel(
-            self.root,
-            text="Ready",
-            anchor="w"
-        )
-        self.status_label.pack(side="bottom", fill="x", padx=10, pady=5)
+            QCheckBox {{
+                color: {self.fg_color.name()};
+                font-size: 14px;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border: 1px solid {self.border_color.name()};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {self.primary_color.name()};
+                border: 1px solid {self.primary_color.name()};
+            }}
+            QCheckBox::indicator:unchecked {{
+                background-color: {self.input_bg_color.name()};
+            }}
+        """)
         
-    def _browse_file(self) -> None:
-        """Open file selection dialog for audit file"""
-        filename = filedialog.askopenfilename(
-            title="Select Audit File",
-            filetypes=(
-                ("Excel files", "*.xlsx"),
-                ("CSV files", "*.csv"),
-                ("All files", "*.*")
-            )
-        )
-        if filename:
-            self.file_path_entry.delete(0, "end")
-            self.file_path_entry.insert(0, filename)
+        # ---- Formulario de entrada ----
+        # Contract Input
+        contract_layout = QVBoxLayout()
+        contract_layout.setSpacing(8)
+        contract_label = QLabel("Contract")
+        contract_label.setStyleSheet(f"color: {self.fg_color.name()}; font-size: 14px; font-weight: 500;")
+        self.contract_input = QLineEdit()
+        self.contract_input.setPlaceholderText("Enter contract number")
+        self.contract_input.setMinimumHeight(40)
+        contract_layout.addWidget(contract_label)
+        contract_layout.addWidget(self.contract_input)
+        card_layout.addLayout(contract_layout)
         
-    def _create_inputs(self) -> None:
-        """Create input fields"""
-        input_frame = ctk.CTkFrame(self.main_frame)
-        input_frame.pack(padx=20, pady=10, fill="x")
-
-        # Contract input
-        contract_label = ctk.CTkLabel(input_frame, text="Contract:")
-        contract_label.pack(padx=5, pady=(10,5), anchor="w")
+        # Audit File Input
+        audit_file_layout = QVBoxLayout()
+        audit_file_layout.setSpacing(8)
+        self.audit_file_info_widget = FileInfoWidget()
+        card_layout.addWidget(self.audit_file_info_widget)
+        audit_label = QLabel("Audit File")
+        audit_label.setStyleSheet(f"color: {self.fg_color.name()}; font-size: 14px; font-weight: 500;")
+        audit_file_row = QHBoxLayout()
+        audit_file_row.setSpacing(10)
+        self.audit_file_input = QLineEdit()
+        self.audit_file_input.setPlaceholderText("Select audit file")
+        self.audit_file_input.setMinimumHeight(40)
         
-        self.contract_entry = ctk.CTkEntry(
-            input_frame, 
-            placeholder_text="Enter contract number",
-            height=32
-        )
-        self.contract_entry.pack(padx=5, pady=(0,10), fill="x")
-
-        # Audit file frame
-        audit_label = ctk.CTkLabel(input_frame, text="Audit File:")
-        audit_label.pack(padx=5, pady=(5,5), anchor="w")
+        audit_browse = QPushButton("Browse")
+        audit_browse.setMinimumHeight(40)
+        audit_browse.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.primary_color.name()};
+                color: white;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-weight: 500;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{
+                background-color: {QColor(self.primary_color).lighter(110).name()};
+            }}
+            QPushButton:pressed {{
+                background-color: {QColor(self.primary_color).darker(110).name()};
+            }}
+        """)
+        audit_browse.clicked.connect(self.browse_audit_file)
         
-        file_frame = ctk.CTkFrame(input_frame)
-        file_frame.pack(padx=5, pady=(0,10), fill="x")
+        audit_file_row.addWidget(self.audit_file_input)
+        audit_file_row.addWidget(audit_browse)
+        audit_file_layout.addWidget(audit_label)
+        audit_file_layout.addLayout(audit_file_row)
+        card_layout.addLayout(audit_file_layout)
         
-        self.file_path_entry = ctk.CTkEntry(
-            file_frame,
-            placeholder_text="Select audit file",
-            height=32
-        )
-        self.file_path_entry.pack(side="left", padx=5, fill="x", expand=True)
         
-        browse_button = ctk.CTkButton(
-            file_frame,
-            text="Browse",
-            command=self._browse_file,
-            width=100,
-            height=32,
-            image=self.folder_icon if self.folder_icon else None,
-            compound="left"
-        )
-        browse_button.pack(side="right", padx=5)
-
-        # Inventory validation switch - Este es el switch que queremos ver
-        self.use_inventory_check = ctk.CTkCheckBox(
-            input_frame,
-            text="Use Inventory Validation",
-            variable=self.use_inventory_var,
-            command=self._toggle_inventory,
-            height=24,
-            checkbox_height=20,
-            checkbox_width=20,
-            corner_radius=4,
-            border_width=2,
-            fg_color="blue",
-            hover_color="#0066cc",
-            text_color="white"
-        )
-        self.use_inventory_check.pack(padx=15, pady=(5,10), anchor="w")
-
-        # Inventory file frame
-        self.inventory_frame = ctk.CTkFrame(input_frame)
-        self.inventory_frame.pack(padx=5, pady=(0,10), fill="x")
+        # Inventory Validation
+        self.use_inventory_check = QCheckBox("Use Inventory Validation")
+        self.use_inventory_check.setChecked(True)
+        self.use_inventory_check.clicked.connect(self.toggle_inventory_input)
+        card_layout.addWidget(self.use_inventory_check)
         
-        inventory_label = ctk.CTkLabel(self.inventory_frame, text="Inventory File:")
-        inventory_label.pack(side="left", padx=5)
+        # Inventory File Input - MODIFICADO: Usar un contenedor para poder ocultarlo
+        self.inventory_container = QWidget()
+        inventory_container_layout = QVBoxLayout(self.inventory_container)  # PRIMERO crea el layout
+        inventory_container_layout.setContentsMargins(0, 0, 0, 0)
+        inventory_container_layout.setSpacing(8)
+        self.inventory_file_info_widget = FileInfoWidget()
+        inventory_container_layout.addWidget(self.inventory_file_info_widget)
+        self.inventory_label = QLabel("Inventory File")
+        self.inventory_label.setStyleSheet(f"color: {self.fg_color.name()}; font-size: 14px; font-weight: 500;")
+        inventory_file_row = QHBoxLayout()
+        inventory_file_row.setSpacing(10)
+        self.inventory_file_input = QLineEdit()
+        self.inventory_file_input.setPlaceholderText("Select inventory file")
+        self.inventory_file_input.setMinimumHeight(40)
         
-        self.inventory_path_entry = ctk.CTkEntry(
-            self.inventory_frame,
-            placeholder_text="Select inventory file",
-            height=32
-        )
-        self.inventory_path_entry.pack(side="left", padx=5, fill="x", expand=True)
+        inventory_browse = QPushButton("Browse")
+        inventory_browse.setMinimumHeight(40)
+        inventory_browse.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.primary_color.name()};
+                color: white;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-weight: 500;
+                font-size: 14px;
+            }}
+            QPushButton:hover {{
+                background-color: {QColor(self.primary_color).lighter(110).name()};
+            }}
+            QPushButton:pressed {{
+                background-color: {QColor(self.primary_color).darker(110).name()};
+            }}
+        """)
+        inventory_browse.clicked.connect(self.browse_inventory_file)
         
-        inventory_browse_button = ctk.CTkButton(
-            self.inventory_frame,
-            text="Browse",
-            command=self._browse_inventory_file,
-            width=100,
-            height=32,
-            image=self.folder_icon if self.folder_icon else None,
-            compound="left"
-        )
-        inventory_browse_button.pack(side="right", padx=5)
-
-    def _browse_inventory_file(self) -> None:
-        """Open file selection dialog for inventory file"""
-        filename = filedialog.askopenfilename(
-            title="Select Inventory File",
-            filetypes=(
-                ("Excel files", "*.xlsx"),
-                ("CSV files", "*.csv"),
-                ("All files", "*.*")
-            )
-        )
-        if filename:
-            self.inventory_path_entry.delete(0, "end")
-            self.inventory_path_entry.insert(0, filename)
-
-    def start_audit(self) -> None:
-        """Start the audit process with detailed progress updates"""
-        logger.debug("-------------------- START AUDIT PRESSED --------------------")
+        inventory_file_row.addWidget(self.inventory_file_input)
+        inventory_file_row.addWidget(inventory_browse)
         
-        try:
-            contract = self.contract_entry.get().strip()
-            file_path = self.file_path_entry.get().strip()
-            inventory_path = None
-            
-            if self.use_inventory_var.get():
-                inventory_path = self.inventory_path_entry.get().strip()
-            
-            if not self._validate_inputs(contract, file_path, inventory_path):
-                return
-
-            # Update UI before processing
-            self._update_ui_state(True)
-            self._update_progress(0.05, "Initializing audit process...")
-            
-            def run_audit():
-                try:
-                    steps = {
-                        0.05: "Initializing audit process...",
-                        0.10: "Opening and validating input file structure...",
-                        0.15: "Reading input file data (this may take several minutes)...",
-                        0.20: "Processing row 1 to 50,000...",
-                        0.25: "Processing row 50,001 to 100,000...",
-                        0.30: "Processing row 100,001 to 150,000...",
-                        0.35: "Processing row 150,001 to 200,000...",
-                        0.40: "Processing row 200,001 to 250,000...",
-                        0.45: "Normalizing data and validating columns...",
-                        0.50: "Loading program requirements from PDM...",
-                        # Serial Control Audit
-                        0.55: "Starting Serial Control audit...",
-                        0.58: "Comparing serial control across organizations...",
-                        0.60: "Checking inventory systems for mismatches...",
-                        0.62: "Validating non-hardware parts...",
-                        # Organization Audit
-                        0.65: "Starting Organization Structure audit...",
-                        0.68: "Analyzing organization hierarchies...",
-                        0.70: "Checking for missing organizations...",
-                        0.72: "Validating organization relationships...",
-                        # Customer ID Audit
-                        0.75: "Starting Customer ID audit...",
-                        0.78: "Validating Customer ID formats...",
-                        0.80: "Checking Customer ID consistency...",
-                        # Cross Reference Audit
-                        0.82: "Starting Cross Reference audit...",
-                        0.85: "Validating vendor references...",
-                        0.87: "Checking marketing part numbers...",
-                        # Final Steps
-                        0.90: "Combining all audit results...",
-                        0.92: "Generating comprehensive audit summary...",
-                        0.94: "Creating final report...",
-                        0.96: "Applying formatting and styles...",
-                        0.98: "Saving final report...",
-                    }
-
-                    def progress_callback(progress: float, message: str):
-                        self.root.after(0, self._update_progress, progress, message)
-                        self.root.after(800)
-
-                    # Execute audit with progress updates
-                    result = self.controller.process_audit(
-                        contract, 
-                        file_path,
-                        inventory_file = inventory_path,
-                        use_inventory= self.use_inventory_var.get(),
-                        progress_callback=progress_callback,
-                        progress_steps=steps
-                    )
-
-                    # Handle result in main thread
-                    self.root.after(0, self._handle_audit_result, result)
-
-                except Exception as e:
-                    logger.error(f"Error in audit: {str(e)}")
-                    logger.error(f"Stack trace: {traceback.format_exc()}")
-                    self.root.after(0, self._handle_audit_error, e)
-                finally:
-                    self.root.after(0, self._update_ui_state, False)
-
-            # Start processing thread
-            self.executor.submit(run_audit)
-
-        except Exception as e:
-            logger.error(f"Error starting audit: {str(e)}")
-            self._handle_audit_error(e)
-                
-            
-    def _update_progress(self, progress: float, status_text: str = None) -> None:
-        """
-        Update progress bar and status text.
+        inventory_container_layout.addWidget(self.inventory_label)
+        inventory_container_layout.addLayout(inventory_file_row)
         
-        Args:
-            progress: Float between 0 and 1 indicating progress
-            status_text: Optional status message to display
-        """
-        self.progress_bar.set(progress)
-        if status_text:
-            self.status_label.configure(text=status_text)
-
+        card_layout.addWidget(self.inventory_container)
+        
+        # Progress Area 
+        progress_section = QVBoxLayout()
+        progress_section.setSpacing(10)
+        
+        # Progress Bar estilizada
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background-color: {QColor(self.card_bg_color).darker(110).name()};
+                border: none;
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {self.accent_color.name()};
+                border-radius: 4px;
+            }}
+        """)
+        
+        # Status indicator
+        status_layout = QHBoxLayout()
+        self.status_icon = QLabel()
+        # Inicialmente podríamos poner un icono de información
+        # self.status_icon.setPixmap(QIcon("info_icon.png").pixmap(16, 16))
+        self.status_icon.setFixedSize(16, 16)
+        
+        self.status_label = QLabel("Ready to process")
+        self.status_label.setStyleSheet(f"color: {self.fg_color.name()}; font-size: 13px;")
+        
+        status_layout.addWidget(self.status_icon)
+        status_layout.addWidget(self.status_label)
+        status_layout.addStretch()
+        
+        progress_section.addWidget(self.progress_bar)
+        progress_section.addLayout(status_layout)
+        card_layout.addLayout(progress_section)
+        
+        # Spacer para empujar los botones hacia abajo
+        spacer_item = QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        card_layout.addItem(spacer_item)
+        
+        # ---- Botones de acción ----
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(15)
+        
+        start_audit = QPushButton("Start Audit")
+        start_audit.setMinimumHeight(45)
+        start_audit.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.primary_color.name()};
+                color: white;
+                border-radius: 6px;
+                padding: 10px 25px;
+                font-weight: 600;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: {QColor(self.primary_color).lighter(110).name()};
+            }}
+            QPushButton:pressed {{
+                background-color: {QColor(self.primary_color).darker(110).name()};
+            }}
+        """)
+        start_audit.clicked.connect(self.start_audit)
+        
+        reset_fields = QPushButton("Reset Fields")
+        reset_fields.setMinimumHeight(45)
+        reset_fields.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.secondary_color.name()};
+                color: white;
+                border-radius: 6px;
+                padding: 10px 25px;
+                font-weight: 600;
+                font-size: 15px;
+            }}
+            QPushButton:hover {{
+                background-color: {QColor(self.secondary_color).lighter(110).name()};
+            }}
+            QPushButton:pressed {{
+                background-color: {QColor(self.secondary_color).darker(110).name()};
+            }}
+        """)
+        reset_fields.clicked.connect(self.reset_fields)
+        
+        button_layout.addWidget(start_audit)
+        button_layout.addWidget(reset_fields)
+        card_layout.addLayout(button_layout)
+        
+        # ---- Integrar componentes en layout principal ----
+        main_layout.addWidget(title_bar)
+        main_layout.addWidget(content_card, 1)  # '1' significa que toma todo el espacio disponible
+        
+        # Establecer el widget principal
+        self.setCentralWidget(main_container)
+        
+        # Comprobar estado inicial de checkbox
+        self.toggle_inventory_input()
     
-    def _update_ui_state(self, is_processing: bool) -> None:
-        """Update UI elements based on processing state"""
-        if is_processing:
-            self.start_button.configure(state="disabled")
-            self.contract_entry.configure(state="disabled")
-            self.file_path_entry.configure(state="disabled")
-            self.progress_bar.set(0)
-            self.status_label.configure(text="Processing audit request...")
+    def toggle_inventory_input(self):
+        """Muestra u oculta completamente el contenedor de inventario según el estado del checkbox"""
+        enabled = self.use_inventory_check.isChecked()
+        self.inventory_container.setVisible(enabled)
+        
+        # Ajustar la altura de la ventana para evitar espacio vacío
+        # self.adjustSize() -> No usar, puede causar problemas con el redimensionamiento
+    
+    def browse_audit_file(self):
+        """Abre diálogo para seleccionar archivo de auditoría"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Audit File", 
+            "", 
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if filename:
+            self.audit_file_input.setText(filename)
+            # Actualizar información del archivo
+            self.audit_file_info_widget.update_info(filename)
+
+    def browse_inventory_file(self):
+        """Abre diálogo para seleccionar archivo de inventario"""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Inventory File", 
+            "", 
+            "Excel Files (*.xlsx);;All Files (*)"
+        )
+        if filename:
+            self.inventory_file_input.setText(filename)
+            # Actualizar información del archivo (si tienes el widget)
+            if hasattr(self, 'inventory_file_info_widget'):
+                self.inventory_file_info_widget.update_info(filename)
+    
+    def start_audit(self):
+        """Inicia el proceso de auditoría con seguimiento de tiempo"""
+        contract = self.contract_input.text().strip()
+        audit_file = self.audit_file_input.text().strip()
+        inventory_file = self.inventory_file_input.text().strip() if self.use_inventory_check.isChecked() else None
+
+        # Validar campos requeridos
+        if not contract or not audit_file:
+            self.status_label.setText("Please complete all required fields")
+            return
+
+        # Validación adicional para archivo de inventario si está habilitado
+        if self.use_inventory_check.isChecked() and not inventory_file:
+            self.status_label.setText("Inventory file is required when inventory validation is enabled")
+            return
+
+        # Verificar existencia de archivos
+        if not Path(audit_file).exists():
+            self.status_label.setText(f"Audit file not found: {audit_file}")
+            return
+            
+        if inventory_file and not Path(inventory_file).exists():
+            self.status_label.setText(f"Inventory file not found: {inventory_file}")
+            return
+
+        # Preparar y comenzar worker thread
+        self.worker = AuditWorker(
+            self.controller,
+            contract,
+            audit_file,
+            inventory_file,
+            self.use_inventory_check.isChecked()
+        )
+        
+        # Conectar señales
+        self.worker.progress_update.connect(self.update_progress)
+        self.worker.audit_completed.connect(self.handle_audit_completed)
+        self.worker.audit_error.connect(self.handle_audit_error)
+        
+        # Iniciar contador de tiempo
+        self.elapsed_seconds = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_timer)
+        self.timer.start(1000)  # Actualizar cada segundo
+        
+        # Deshabilitar campos durante procesamiento
+        self.setInputsEnabled(False)
+        self.worker.start()
+            
+    def update_progress(self, value, message, rows_processed=0):
+        """Actualiza la barra de progreso y el mensaje de estado"""
+        self.progress_bar.setValue(value)
+        self.status_label.setText(message)
+    
+        # Actualizar la interfaz para mostrar cambios inmediatamente
+        QApplication.processEvents()
+
+    def update_timer(self):
+        """Actualiza el contador de tiempo transcurrido"""
+        self.elapsed_seconds += 1
+        minutes, seconds = divmod(self.elapsed_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        
+        if hours > 0:
+            time_str = f"{hours}h {minutes:02d}m {seconds:02d}s"
         else:
-            self.start_button.configure(state="normal")
-            self.contract_entry.configure(state="normal")
-            self.file_path_entry.configure(state="normal")
-
-    def _validate_inputs(self, contract: str, file_path: str, inventory_path: str) -> bool:
-        """Validate user inputs"""
-        try:
-            # Validar contrato
-            if not contract:
-                messagebox.showwarning("Warning", "Please enter a contract number")
-                return False
-            
-            # Validar archivo de auditoría
-            if not file_path or not Path(file_path).exists():
-                messagebox.showwarning("Warning", "Please select a valid audit file")
-                return False
-                
-            # Validar archivo principal como archivo de auditoría
-            self.controller.audit_service.excel_repository.validate_input_file(file_path)
-            
-            # Validar archivo de inventario solo si el switch está activado
-            if self.use_inventory_var.get():
-                if not inventory_path:
-                    messagebox.showwarning("Warning", "Please select an inventory file or disable inventory validation")
-                    return False
-                if not Path(inventory_path).exists():
-                    messagebox.showwarning("Warning", "Please select a valid inventory file")
-                    return False
-                # Usar la validación específica para archivos de inventario
-                self.controller.audit_service.excel_repository.validate_inventory_file(inventory_path)
-            
-            return True
+            time_str = f"{minutes:02d}m {seconds:02d}s"
         
-        except Exception as e:
-            messagebox.showwarning("Warning", f"File validation failed: {str(e)}")
-            return False
+        # Añadir tiempo al mensaje de estado actual
+        current_text = self.status_label.text()
+        if " - Time: " in current_text:
+            updated_text = current_text.split(" - Time: ")[0] + f" - Time: {time_str}"
+        else:
+            updated_text = current_text + f" - Time: {time_str}"
+        
+        self.status_label.setText(updated_text)
 
-    def _handle_audit_result(self, result: dict) -> None:
-        """Handle audit results"""
-        try:
-            if result["status"] == "success":
-                data = result.get("data", {})
-                
-                # Use .get() with default values to prevent KeyError
-                external_report_name = Path(data.get('external_report_path', '')).name if data.get('external_report_path') else "N/A"
-                internal_report_name = Path(data.get('internal_report_path', '')).name if data.get('internal_report_path') else "N/A"
-                
-                final_message = (
-                    "Audit completed successfully.\n\n"
-                    "Reports generated:\n"
-                    f"1. Serial Control Report: {external_report_name}\n"
-                    f"2. Organization Validation Report: {internal_report_name}\n\n"
-                    "Please check the reports for detailed findings."
-                )
-                self._update_status("Audit completed successfully")
-                messagebox.showinfo("Success", final_message)
-                
-                try:
-                    # Open REPORTS directory
-                    report_dir = Path('reports')
-                    if report_dir.exists():
-                        os.startfile(str(report_dir))
-                    else:
-                        logger.warning("REPORTS directory not found")
-                except Exception as e:
-                    logger.error(f"Error opening REPORTS directory: {str(e)}")
+    def handle_audit_completed(self, result):
+        """Maneja finalización deteniendo timer y actualizando estado"""
+        # Detener timer
+        if hasattr(self, 'timer') and self.timer.isActive():
+            self.timer.stop()
+        
+        # Actualizar UI
+        self.setInputsEnabled(True)
+        
+        if result['status'] == 'success':
+            # Finalizar barra de progreso a 100%
+            self.progress_bar.setValue(100)
+            
+            # Actualizar mensaje con información de tiempo
+            minutes, seconds = divmod(self.elapsed_seconds, 60)
+            hours, minutes = divmod(minutes, 60)
+            
+            if hours > 0:
+                time_str = f"{hours}h {minutes:02d}m {seconds:02d}s"
             else:
-                self._update_status("Audit process failed")
-                error_message = result.get("message", "Unknown error occurred")
-                logger.error(f"Audit failed: {error_message}")
-                messagebox.showerror("Error", error_message)
-        
-        except Exception as e:
-            logger.error(f"Unexpected error in handling audit result: {str(e)}")
-            traceback.print_exc()
-            messagebox.showerror("Unexpected Error", f"An unexpected error occurred: {str(e)}")
+                time_str = f"{minutes:02d}m {seconds:02d}s"
+                
+            self.status_label.setText(f"Audit completed successfully in {time_str}!")
             
-    def _handle_audit_error(self, error: Exception) -> None:
-        """Handle errors that occur during the audit process"""
-        logger.error(f"Error during audit process: {str(error)}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        messagebox.showerror("Audit Error", f"An error occurred during the audit process: {str(error)}")
-        self._update_ui_state(False)
+            # Crear mensaje emergente
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Audit Completed")
+            msg_box.setText(f"Audit completed successfully in {time_str}!")
+            msg_box.setInformativeText("Would you like to open the reports folder?")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            
+            # Personalizar colores del mensaje
+            msg_box.setStyleSheet(f"""
+                QMessageBox {{
+                    background-color: {self.card_bg_color.name()};
+                }}
+                QLabel {{
+                    color: {self.fg_color.name()};
+                }}
+                QPushButton {{
+                    background-color: {self.primary_color.name()};
+                    color: white;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background-color: {QColor(self.primary_color).lighter(110).name()};
+                }}
+            """)
+            
+            # Mostrar el mensaje y procesar respuesta
+            response = msg_box.exec()
+            
+            # Si usuario quiere abrir la carpeta
+            if response == QMessageBox.StandardButton.Yes:
+                reports_path = Path('reports')
+                if reports_path.exists():
+                    os.startfile(str(reports_path))
+        else:
+            # Manejar error
+            error_msg = result.get('message', 'Unknown error')
+            self.status_label.setText(f"Audit failed: {error_msg}")
+            
+            # Mensaje emergente para error
+            error_box = QMessageBox(self)
+            error_box.setWindowTitle("Audit Failed")
+            error_box.setText(f"Audit failed: {error_msg}")
+            error_box.setIcon(QMessageBox.Icon.Warning)
+            error_box.setStyleSheet(f"""
+                QMessageBox {{
+                    background-color: {self.card_bg_color.name()};
+                }}
+                QLabel {{
+                    color: {self.fg_color.name()};
+                }}
+                QPushButton {{
+                    background-color: {self.primary_color.name()};
+                    color: white;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    font-weight: 500;
+                }}
+            """)
+            error_box.exec()
 
-    def _update_status(self, text: str) -> None:
-        """Update status text safely"""
-        self.status_label.configure(text=text)
+    def handle_audit_error(self, error):
+        """Maneja errores deteniendo el timer y actualizando estado"""
+        # Detener timer
+        if hasattr(self, 'timer') and self.timer.isActive():
+            self.timer.stop()
+            
+        # Actualizar UI
+        self.setInputsEnabled(True)
+        self.status_label.setText(f"Error: {str(error)}")
+        
+        # Registro detallado del error
+        print(traceback.format_exc())
 
-    def run(self) -> None:
-        """Start the application"""
-        self.root.protocol("WM_DELETE_WINDOW", self.cleanup)
-        self.root.mainloop()
+    def reset_fields(self):
+        """Limpia todos los campos y restablece el estado inicial"""
+        self.contract_input.clear()
+        self.audit_file_input.clear()
+        self.inventory_file_input.clear()
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Ready to process")
+        self.use_inventory_check.setChecked(True)
+        
+        # Activar controles de inventario
+        self.toggle_inventory_input()
 
-    def cleanup(self) -> None:
-        """Clean up resources before closing"""
-        try:
-            logger.debug("Cleaning up resources...")
-            if hasattr(self, 'executor'):
-                self.executor.shutdown(wait=False)
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
-        finally:
-            self.root.destroy()
+    def setInputsEnabled(self, enabled):
+        """Habilita/deshabilita los campos de entrada durante el procesamiento"""
+        self.contract_input.setEnabled(enabled)
+        self.audit_file_input.setEnabled(enabled)
+        self.use_inventory_check.setEnabled(enabled)
+        
+        # Asegurarse que el campo de inventario refleje tanto el estado general como el del checkbox
+        if enabled:
+            self.inventory_file_input.setEnabled(self.use_inventory_check.isChecked())
+        else:
+            self.inventory_file_input.setEnabled(False)
+
+    def run(self):
+        """Muestra la ventana"""
+        self.show()
+        
+    # Funciones para permitir redimensionamiento de la ventana
+    def mousePressEvent(self, event):
+        """Maneja el evento de presionar el mouse para mover/redimensionar la ventana"""
+        if self.isInResizeArea(event.position().x(), event.position().y()):
+            self.resize_mode = True
+            self.resize_start_position = event.globalPosition().toPoint()
+            self.resize_start_size = QSize(self.width(), self.height())
+            # Cursor de redimensionado
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        # Mover la ventana (cuando se hace clic en la barra de título)
+        elif event.button() == Qt.MouseButton.LeftButton and event.position().y() < 40:
+            self.old_pos = event.globalPosition().toPoint()
+            self.move_mode = True
+        else:
+            self.resize_mode = False
+            self.move_mode = False
+    
+    def mouseMoveEvent(self, event):
+        """Maneja el movimiento del mouse para redimensionar o mover la ventana"""
+        # Redimensionar la ventana
+        if hasattr(self, 'resize_mode') and self.resize_mode:
+            delta = event.globalPosition().toPoint() - self.resize_start_position
+            new_width = self.resize_start_size.width() + delta.x()
+            new_height = self.resize_start_size.height() + delta.y()
+            
+            # Respetar tamaños mínimos y máximos
+            new_width = max(min(new_width, self.maximumWidth()), self.minimumWidth())
+            new_height = max(min(new_height, self.maximumHeight()), self.minimumHeight())
+            
+            self.resize(new_width, new_height)
+        # Mover la ventana
+        elif hasattr(self, 'move_mode') and self.move_mode and hasattr(self, 'old_pos'):
+            delta = event.globalPosition().toPoint() - self.old_pos
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+            self.old_pos = event.globalPosition().toPoint()
+        else:
+            # Cambiar el cursor cuando esté sobre el área de redimensionado
+            if self.isInResizeArea(event.position().x(), event.position().y()):
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+    
+    def mouseReleaseEvent(self, event):
+        """Maneja la liberación del mouse después de redimensionar/mover"""
+        self.resize_mode = False
+        self.move_mode = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+    
+    def isInResizeArea(self, x, y):
+        """Determina si el cursor está en el área de redimensionamiento (esquina inferior derecha)"""
+        resize_border = 15  # Ancho en píxeles del borde para redimensionar
+        return (self.width() - resize_border < x < self.width() and 
+                self.height() - resize_border < y < self.height())
+        
+    def isInBorderArea(self, x, y):
+        """Determina si el cursor está en cualquier borde para redimensionar"""
+        border = 5  # Ancho del borde sensible para redimensionamiento
+        # Borde izquierdo
+        if 0 <= x <= border:
+            return "left"
+        # Borde derecho
+        elif self.width() - border <= x <= self.width():
+            return "right"
+        # Borde superior
+        elif 0 <= y <= border:
+            return "top"
+        # Borde inferior
+        elif self.height() - border <= y <= self.height():
+            return "bottom"
+        return None

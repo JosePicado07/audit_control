@@ -107,18 +107,6 @@ class ExcelRepository:
 
 
     def _normalize_column_name(self, col_name: str) -> str:
-        """
-        Normaliza un único nombre de columna.
-        
-        Args:
-            col_name: Nombre de columna a normalizar
-            
-        Returns:
-            Nombre de columna normalizado
-        """
-        if not isinstance(col_name, str):
-            col_name = str(col_name)
-            
         return (col_name
                 .strip()
                 .replace('\n', '')
@@ -319,51 +307,48 @@ class ExcelRepository:
     ) -> pd.DataFrame:
         """
         Lee archivo Excel utilizando la estrategia óptima basada en el tamaño y tipo.
-        
-        Args:
-            file_path: Ruta al archivo Excel
-            is_inventory: Indica si es un archivo de inventario
-            sheet_name: Nombre de la hoja (opcional)
-            **kwargs: Parámetros adicionales para la lectura
-            
-        Returns:
-            DataFrame con datos normalizados
         """
+        # Inicio: Logging de información básica
+        logger.info(f"Iniciando lectura de archivo Excel")
+        logger.info(f"Ruta del archivo: {file_path}")
+        
         # Normalizar path
         file_path = Path(file_path) if isinstance(file_path, str) else file_path
         
+        # Validar existencia del archivo
         if not file_path.exists():
             raise ValueError(f"Archivo no encontrado: {file_path}")
-            
-        # Determinar estrategia basada en tamaño
-        file_size_mb = file_path.stat().st_size / (1024 * 1024)
-        logger.debug(f"Leyendo archivo: {file_path} ({file_size_mb:.2f} MB)")
         
-        # Leer información de hojas una sola vez
+        # Calcular tamaño del archivo
+        file_size_mb = file_path.stat().st_size / (1024 * 1024)
+        logger.info(f"Tamaño del archivo: {file_size_mb:.2f} MB")
+        
+        # Manejar selección de hoja
         with pd.ExcelFile(file_path) as xl:
             sheets = xl.sheet_names
+            logger.debug(f"Hojas disponibles: {sheets}")
             
-            # Si no se especifica hoja, usar la primera
+            # Seleccionar hoja por defecto
             if not sheet_name and len(sheets) > 0:
                 sheet_name = sheets[0]
-                
+                logger.info(f"Seleccionada primera hoja: {sheet_name}")
+            
+            # Validar hoja seleccionada
             if sheet_name and sheet_name not in sheets:
                 raise ValueError(f"Hoja '{sheet_name}' no encontrada. Hojas disponibles: {sheets}")
         
         # Lectura basada en tamaño y tipo
         try:
-            # Para archivos grandes o inventario, usar enfoque optimizado
-            if file_size_mb > 30 or is_inventory:
-                try:
-                    logger.info(f"Usando Polars para lectura optimizada")
-                    
+            # Estrategia para archivos grandes o de inventario
+            if file_size_mb > 10 or is_inventory:
+                try:                    
                     # Leer con Polars
                     df_pl = pl.read_excel(
                         file_path,
                         sheet_name=sheet_name,
-                        read_options={"skip_rows": 1}
+                        read_options={"skip_rows": 1, "header_row": 1}  # Argumentos correctos en Polars 1.26
                     )
-                    
+                                        
                     # Normalizar columnas
                     df_pl = df_pl.rename({
                         col: self._normalize_column_name(col) 
@@ -372,26 +357,48 @@ class ExcelRepository:
                     
                     # Convertir a pandas
                     df = df_pl.to_pandas()
+                                        
                 except Exception as e:
                     logger.warning(f"Error con Polars: {str(e)}. Usando pandas como fallback.")
-                    df = pd.read_excel(file_path, skiprows=1, sheet_name=sheet_name, engine='openpyxl')
+                    logger.debug(f"Detalle de error Polars: {traceback.format_exc()}")
+                    
+                    # Fallback a Pandas
+                    df = pd.read_excel(
+                        file_path, 
+                        skiprows=1, 
+                        sheet_name=sheet_name, 
+                        engine='openpyxl',
+                        dtype=str  # Forzar lectura como string
+                    )
             else:
                 # Para archivos pequeños, usar pandas directamente
-                df = pd.read_excel(file_path, skiprows=1, sheet_name=sheet_name, engine='openpyxl')
+                logger.info("Usando lectura directa con Pandas")
+                df = pd.read_excel(
+                    file_path, 
+                    skiprows=1, 
+                    sheet_name=sheet_name, 
+                    engine='openpyxl',
+                    dtype=str  # Forzar lectura como string
+                )
             
             # Normalizar columnas en caso de pandas
             if isinstance(df, pd.DataFrame):
-                df.columns = [self._normalize_column_name(col) for col in df.columns]
+                
+                # Normalización de columnas
+                df.columns = [self._normalize_column_name(str(col)) for col in df.columns]
                 
                 # Eliminar columnas sin nombre
-                df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
+                df = df.loc[:, ~df.columns.str.contains('^UNNAMED:', case=False, na=False)]
             
+            logger.info(f"Lectura de archivo completada exitosamente. Filas: {len(df)}")
             return df
-        except Exception as e:
-            logger.error(f"Error leyendo archivo Excel {file_path}: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            raise
         
+        except Exception as e:
+            logger.error(f"Error crítico leyendo archivo Excel {file_path}")
+            logger.error(f"Mensaje de error: {str(e)}")
+            logger.error(f"Detalle técnico: {traceback.format_exc()}")
+            raise
+            
     def validate_and_read_file(self, file_path: Union[str, Path], is_inventory: bool = False, sheet_name: Optional[str] = None, column_mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
         """
         Valida y lee un archivo Excel en una sola operación, optimizando el rendimiento.
@@ -586,15 +593,28 @@ class ExcelRepository:
             
     def _validate_inventory_columns(self, df: pd.DataFrame) -> None:
         """Valida las columnas requeridas para archivos de inventario."""
-        # Normalizar nombres de columnas para comparación más flexible
-        df_columns = {self._normalize_column_name(col) for col in df.columns}
+        logger.info("=== VALIDACIÓN DE COLUMNAS DE INVENTARIO ===")
+        
+        # Mostrar columnas disponibles
+        logger.info("Columnas disponibles:")
+        for col in df.columns:
+            logger.info(f"  - {col}")
+        
+        # Normalizar columnas requeridas
         required_columns = {self._normalize_column_name(col) for col in self.inventory_required_columns.keys()}
+        df_columns = {self._normalize_column_name(col) for col in df.columns}
         
-        # Para debug, mostrar columnas disponibles
-        logger.debug(f"Columnas en archivo: {sorted(df_columns)}")
-        logger.debug(f"Columnas requeridas: {sorted(required_columns)}")
+        logger.info("\nColumnas requeridas:")
+        for col in sorted(required_columns):
+            logger.info(f"  - {col}")
         
+        # Encontrar columnas faltantes
         missing_columns = required_columns - df_columns
+        
+        logger.info("\nColumnas faltantes:")
+        for col in missing_columns:
+            logger.info(f"  - {col}")
+        
         if missing_columns:
             raise ValueError(f"Inventory file missing critical columns: {missing_columns}")
         

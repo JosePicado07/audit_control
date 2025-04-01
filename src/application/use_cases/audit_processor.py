@@ -5,6 +5,7 @@ import traceback
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 import pandas as pd
+import polars as pl
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from datetime import datetime
@@ -925,181 +926,228 @@ class AuditProcessor:
 
     def _check_missing_orgs(self, df: pd.DataFrame, org_destination: List[str]) -> Dict:
         """
-        Versión optimizada que utiliza Polars y procesamiento paralelo por lotes
-        para verificar y clasificar las organizaciones para cada pieza.
+        Optimized implementation for checking missing organizations.
+        Compatible with Polars 1.26+
+        
+        Args:
+            df: DataFrame with audit data
+            org_destination: List of target organizations
+            
+        Returns:
+            Dict with missing organizations analysis
         """
         try:
-            import os
-            import time
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            import polars as pl
+
             
             start_time = time.time()
             logger.info("=== CHECKING MISSING ORGS (OPTIMIZED) ===")
             
-            # Estructura para resultados finales
+            # 1. Input Normalization - Single normalized copy of org_destination
+            normalized_org_dest = sorted([str(org).strip().zfill(2) for org in org_destination])
+            org_dest_set = set(normalized_org_dest)  # For O(1) lookup
+            
+            # 2. Convert input to Polars and keep conversion as lazy as possible
+            if isinstance(df, pd.DataFrame):
+                # Convert once with schema inference to avoid redundant analysis
+                df_pl = pl.from_pandas(df, include_index=False)
+            else:
+                df_pl = df
+                
+            # 3. Use simplified non-lazy approach first to avoid version compatibility issues
+            # For Polars 1.26, we'll use direct expressions rather than method chaining
+            
+            # Get available columns
+            available_columns = set(df_pl.columns)
+            
+            # Normalize Organization column using Polars 1.26 compatible syntax
+            df_pl = df_pl.with_columns([
+                # Convert Organization to string and normalize
+                pl.col("Organization")
+                .cast(pl.Utf8)
+                .fill_null("")
+                .alias("org_raw")
+            ])
+            
+            # Manually apply strip and zfill since str namespace has changed
+            df_pl = df_pl.with_columns([
+                pl.col("org_raw").str.strip_chars().alias("org_stripped")
+            ])
+            
+            # In Polars 1.26, create a UDF for zfill since it might not be available directly
+            df_pl = df_pl.with_columns([
+                  pl.col("org_stripped").str.zfill(2).alias("org_normalized")
+                ])
+            
+            # Keep Part Number for grouping
+            df_pl = df_pl.with_columns([
+                pl.col("Part Number").alias("part_key")
+            ])
+            
+            # 4. Select and prepare columns directly
+            select_columns = ["part_key", "org_normalized"]
+            
+            # Add metadata columns if they exist
+            if "Vertex" in available_columns:
+                select_columns.append("Vertex")
+            elif "VERTEX PRODUCT CLASS" in available_columns:
+                select_columns.append("VERTEX PRODUCT CLASS")
+                
+            if "Description" in available_columns:
+                select_columns.append("Description")
+            elif "DESCRIPTION" in available_columns:
+                select_columns.append("DESCRIPTION")
+                
+            if "Status" in available_columns:
+                select_columns.append("Status")
+            elif "ITEM STATUS" in available_columns:
+                select_columns.append("ITEM STATUS")
+            
+            # Select only needed columns to reduce memory usage
+            df_pl = df_pl.select(select_columns)
+            
+            # 5. Group and aggregate data
+            logger.debug("Calculating part information")
+            
+            # Process part metadata by grouping
+            agg_expressions = [
+                pl.col("org_normalized").unique().alias("current_orgs")
+            ]
+            
+            # Add metadata columns to aggregation if they exist
+            if "Vertex" in df_pl.columns:
+                agg_expressions.append(pl.col("Vertex").first().alias("vertex_class"))
+            elif "VERTEX PRODUCT CLASS" in df_pl.columns:
+                agg_expressions.append(pl.col("VERTEX PRODUCT CLASS").first().alias("vertex_class"))
+                
+            if "Description" in df_pl.columns:
+                agg_expressions.append(pl.col("Description").first().alias("description"))
+            elif "DESCRIPTION" in df_pl.columns:
+                agg_expressions.append(pl.col("DESCRIPTION").first().alias("description"))
+                
+            if "Status" in df_pl.columns:
+                agg_expressions.append(pl.col("Status").first().alias("status"))
+            elif "ITEM STATUS" in df_pl.columns:
+                agg_expressions.append(pl.col("ITEM STATUS").first().alias("status"))
+            
+            # Perform group by and aggregation
+            part_info = df_pl.group_by("part_key").agg(agg_expressions)
+            
+            # 6. Convert to Python structures for final processing
+            logger.debug("Processing missing organizations")
+            
+            # Convert to dictionaries
+            part_records = part_info.to_dicts()
             missing_items = []
             
-            # Normalizar org_destination una sola vez
-            normalized_org_dest = [str(org).strip().zfill(2) for org in org_destination]
-            logger.info(f"Organizaciones destino normalizadas: {normalized_org_dest}")
+            # Process each part
+            for record in part_records:
+                part_key = record["part_key"]
+                
+                # Default empty values for safety
+                current_orgs = set(record.get("current_orgs", []))
+                vertex_class = record.get("vertex_class", "")
+                description = record.get("description", "")
+                status = record.get("status", "Active")
+                
+                # Calculate missing orgs using set operations
+                missing_orgs = sorted(list(set(normalized_org_dest) - current_orgs))
+                current_orgs_filtered = sorted(list(current_orgs & org_dest_set))
+                
+                # Only include if relevant
+                if not (missing_orgs or current_orgs_filtered):
+                    continue
+                    
+                # Create org status mapping
+                org_status = {org: status for org in current_orgs}
+                    
+                # Create result record
+                missing_items.append({
+                    'part_number': part_key,
+                    'missing_orgs': missing_orgs,
+                    'current_orgs': current_orgs_filtered,
+                    'org_status': org_status,
+                    'vertex_class': vertex_class,
+                    'description': description
+                })
             
-            # Intentar usar Polars para procesamiento vectorizado
-            try:
-                # Convertir a DataFrame de Polars si no lo es ya
-                if isinstance(df, pd.DataFrame):
-                    df_pl = pl.from_pandas(df)
-                else:
-                    df_pl = df
-                    
-                # Normalizar columna Organization
-                df_pl = df_pl.with_columns([
-                    pl.col("Organization")
-                    .cast(pl.Utf8, strict=False)  # Convertir a string sin fallar
-                    .fill_null("")  # Reemplazar valores nulos con cadena vacía
-                    .str.strip()
-                    .str.zfill(2)  # Agregar ceros a la izquierda
-                    .alias("org_normalized")
-                ])
-                
-                # Obtener todas las partes únicas para procesamiento por lotes
-                unique_parts = df_pl["Part Number"].unique().to_list()
-                total_parts = len(unique_parts)
-                
-                # Calcular tamaño de lote óptimo
-                batch_size = min(500, max(50, total_parts // (os.cpu_count() * 2 or 4)))
-                part_batches = [unique_parts[i:i+batch_size] for i in range(0, total_parts, batch_size)]
-                
-                logger.info(f"Procesando {total_parts} partes en {len(part_batches)} lotes")
-                
-                # Pre-calcular información por parte para acceso rápido
-                # Agrupar por Part Number
-                part_info_expr = [
-                    pl.first("Vertex").alias("vertex_class"),
-                    pl.first("Description").alias("description"),
-                    pl.col("org_normalized").unique().alias("existing_orgs"),
-                ]
-                
-                # Si Status está disponible, agregarlo
-                if "Status" in df_pl.columns:
-                    part_info_expr.append(
-                        pl.struct(["org_normalized", "Status"])
-                        .unique()
-                        .alias("org_status_pairs")
-                    )
-                
-                # Ejecutar agrupación
-                part_info_df = df_pl.group_by("Part Number").agg(part_info_expr)
-                
-                # Opcional: Convertir a diccionario para procesamiento por lotes
-                # (dependiendo de la implementación)
-                
-                # Función para procesar un lote de partes
-                def process_batch(batch_parts):
-                    batch_missing_items = []
-                    
-                    # Filtrar solo las partes en este lote
-                    batch_info = part_info_df.filter(pl.col("Part Number").is_in(batch_parts))
-                    
-                    # Procesar cada parte
-                    for row in batch_info.to_dicts():
-                        part_number = row["Part Number"]
-                        existing_orgs = set(row["existing_orgs"])
-                        
-                        # Encontrar organizaciones faltantes y existentes
-                        missing_orgs = [org for org in normalized_org_dest if org not in existing_orgs]
-                        current_orgs = [org for org in normalized_org_dest if org in existing_orgs]
-                        
-                        # Crear diccionario de estado
-                        org_status = {}
-                        if "org_status_pairs" in row:
-                            for pair in row["org_status_pairs"]:
-                                org = pair["org_normalized"]
-                                status = pair["Status"]
-                                org_status[org] = status
-                        
-                        # Solo agregar si hay orgs faltantes o existentes
-                        if missing_orgs or current_orgs:
-                            batch_missing_items.append({
-                                'part_number': part_number,
-                                'missing_orgs': missing_orgs,
-                                'current_orgs': current_orgs,
-                                'org_status': org_status,
-                                'vertex_class': row.get("vertex_class", ""),
-                                'description': row.get("description", "")
-                            })
-                    
-                    return batch_missing_items
-                
-                # Procesar lotes en paralelo
-                with ThreadPoolExecutor(max_workers=min(os.cpu_count() * 2 or 4, 8)) as executor:
-                    batch_results = list(executor.map(process_batch, part_batches))
-                
-                # Combinar resultados
-                for batch_result in batch_results:
-                    missing_items.extend(batch_result)
-                    
-            except Exception as e:
-                # Si falla el procesamiento con Polars, usar pandas como respaldo
-                logger.warning(f"Error en procesamiento con Polars: {str(e)}")
-                logger.warning("Fallback a procesamiento con Pandas")
-                
-                # Implementación con pandas (optimizamos el código original)
-                for part_number, part_group in df.groupby('Part Number'):
-                    # Crear diccionarios para estados y existencia
-                    org_status = {}
-                    org_exists = {}
-                    
-                    # Procesar organizaciones existentes
-                    for _, row in part_group.iterrows():
-                        org = str(row['Organization']).strip().zfill(2)
-                        status = row.get('Status', 'Active')
-                        org_status[org] = status
-                        org_exists[org] = True
-                    
-                    # Verificar organizaciones de destino
-                    missing_orgs = [org for org in normalized_org_dest if org not in org_exists]
-                    current_orgs = [org for org in normalized_org_dest if org in org_exists]
-                    
-                    # Solo agregar si hay orgs faltantes o existentes
-                    if missing_orgs or current_orgs:
-                        vertex_class = part_group['Vertex'].iloc[0] if 'Vertex' in part_group.columns else ""
-                        description = part_group['Description'].iloc[0] if 'Description' in part_group.columns else ""
-                        
-                        missing_items.append({
-                            'part_number': part_number,
-                            'missing_orgs': missing_orgs,
-                            'current_orgs': current_orgs,
-                            'org_status': org_status,
-                            'vertex_class': vertex_class,
-                            'description': description
-                        })
+            # 7. Create final result
+            elapsed_time = time.time() - start_time
             
-            # Preparar resultado final
             result = {
                 'missing_items': missing_items,
                 'total_missing': len(missing_items),
-                'processing_time': time.time() - start_time
+                'processing_time': elapsed_time
             }
             
-            # Logging reducido para debugging (solo ejemplos, no todo)
-            if missing_items:
-                # Log solo 3 ejemplos para diagnóstico
-                for item in missing_items[:3]:
-                    logger.debug(f"Part {item['part_number']}:")
-                    logger.debug(f"  Missing orgs: {item['missing_orgs']}")
-                    logger.debug(f"  Current orgs: {item['current_orgs']}")
-            
-            elapsed_time = time.time() - start_time
-            logger.info(f"_check_missing_orgs completado en {elapsed_time:.2f} segundos")
-            logger.info(f"Total de partes con orgs faltantes: {len(missing_items)}")
+            logger.info(f"_check_missing_orgs completed in {elapsed_time:.2f} seconds")
+            logger.info(f"Total parts with missing orgs: {len(missing_items)}")
             
             return result
-                        
+            
         except Exception as e:
-            logger.error(f"Error in _check_missing_orgs: {str(e)}")
+            logger.error(f"Error in optimized _check_missing_orgs: {str(e)}")
             logger.error(f"Stack trace: {traceback.format_exc()}")
-            raise
+            
+            # Fallback to simplified pandas implementation
+            return self._check_missing_orgs_fallback(df, org_destination)
+        
+    def _check_missing_orgs_fallback(self, df: pd.DataFrame, org_destination: List[str]) -> Dict:
+        """Reliable fallback implementation for missing orgs detection"""
+        start_time = time.time()
+        logger.warning("Using fallback implementation for missing orgs check")
+        
+        # Normalize org_destination once
+        normalized_org_dest = [str(org).strip().zfill(2) for org in org_destination]
+        missing_items = []
+        
+        # Process each part group
+        for part_number, part_group in df.groupby('Part Number'):
+            # Extract and normalize orgs in a single pass
+            orgs = set()
+            org_status = {}
+            
+            for _, row in part_group.iterrows():
+                org = str(row['Organization']).strip().zfill(2)
+                orgs.add(org)
+                org_status[org] = row.get('Status', 'Active')
+            
+            # Calculate missing orgs efficiently
+            missing_orgs = [org for org in normalized_org_dest if org not in orgs]
+            current_orgs = [org for org in normalized_org_dest if org in orgs]
+            
+            # Only include if there are orgs to report
+            if missing_orgs or current_orgs:
+                # Extract metadata once
+                vertex_class = ""
+                description = ""
+                
+                if 'Vertex' in part_group.columns and not part_group['Vertex'].empty:
+                    vertex_class = part_group['Vertex'].iloc[0]
+                elif 'VERTEX PRODUCT CLASS' in part_group.columns and not part_group['VERTEX PRODUCT CLASS'].empty:
+                    vertex_class = part_group['VERTEX PRODUCT CLASS'].iloc[0]
+                    
+                if 'Description' in part_group.columns and not part_group['Description'].empty:
+                    description = part_group['Description'].iloc[0]
+                elif 'DESCRIPTION' in part_group.columns and not part_group['DESCRIPTION'].empty:
+                    description = part_group['DESCRIPTION'].iloc[0]
+                
+                missing_items.append({
+                    'part_number': part_number,
+                    'missing_orgs': missing_orgs,
+                    'current_orgs': current_orgs,
+                    'org_status': org_status,
+                    'vertex_class': vertex_class,
+                    'description': description
+                })
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Fallback missing orgs check completed in {elapsed_time:.2f} seconds")
+        
+        return {
+            'missing_items': missing_items,
+            'total_missing': len(missing_items),
+            'processing_time': elapsed_time
+        }
     
 
     def _process_other_attributes_audit(
