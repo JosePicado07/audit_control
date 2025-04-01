@@ -33,10 +33,10 @@ class ExcelRepository:
         """Initialize repository with paths."""
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self.config_path = Path(config_path) if config_path else self.base_path
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+        self._dataframe_cache = LimitedCache(max_items=20)  # Caché más inteligente
         
         # Inicializar cache para DataFrames
-        self._dataframe_cache = {}
         self._validation_results = {}
         
         self.inventory_required_columns = InventoryColumns.get_required_columns()
@@ -182,122 +182,100 @@ class ExcelRepository:
             return False
         
         
-    def _read_with_polars_simple(self, file_path: Path, is_inventory: bool = False, sheet_name: Optional[str] = None) -> pd.DataFrame:
+    def _read_with_polars(
+        self, 
+        file_path: Path, 
+        is_inventory: bool = False, 
+        sheet_name: Optional[str] = None,
+        read_mode: str = 'auto'  # 'auto', 'lazy', 'simple'
+    ) -> Optional[pd.DataFrame]:
         """
-        Lee archivos Excel con Polars usando la estructura exacta de tus archivos:
-        - Primera fila: título (se salta)
-        - Segunda fila: nombres de columnas
-        - Resto: datos
-        """
+        Método unificado para lectura de archivos Excel con Polars.
         
-        print(f"Leyendo archivo con Polars (versión simple): {file_path}")
+        Args:
+            file_path: Ruta del archivo Excel
+            is_inventory: Indica si es un archivo de inventario
+            sheet_name: Nombre de la hoja a leer
+            read_mode: Modo de lectura ('auto', 'lazy', 'simple')
+        
+        Returns:
+            DataFrame procesado
+        """
         start_time = time.time()
-        
+        logger.info(f"Iniciando lectura con Polars: {file_path}")
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+            
         try:
-            # 1. Identificar la hoja a usar
+            # Selección de hoja
             if sheet_name is None:
-                import pandas as pd
                 xl = pd.ExcelFile(file_path)
                 sheets = xl.sheet_names
                 sheet_name = sheets[0] if sheets else None
-                print(f"Usando primera hoja: {sheet_name}")
-            
-            # 2. Leer con Polars saltando la primera fila (título)
-            # El parámetro clave: skip_rows=1
-            df_pl = pl.read_excel(
-            file_path,
-            sheet_name=sheet_name,
-            read_options={"skip_rows": 1, "header_row": 1}  # Argumento correcto en Polars 1.26
-        )
+                logger.info(f"Usando primera hoja: {sheet_name}")
 
-            
-            # 3. Convertir a Pandas para compatibilidad con código existente
-            df_pd = df_pl.to_pandas()
-            
-            # 4. Normalizar nombres de columnas exactamente igual que antes
+            # Opciones de lectura comunes
+            read_options = {
+                "skip_rows": 1,  # Saltar primera fila de título
+                "header_row": 1,  # Usar segunda fila como encabezado
+            }
+
+            # Determinar modo de lectura
+            if read_mode == 'auto':
+                file_size_mb = file_path.stat().st_size / (1024 * 1024)
+                read_mode = 'lazy' if file_size_mb > 10 or is_inventory else 'simple'
+
+            # Leer con el modo seleccionado
+            if read_mode == 'lazy':
+                # Procesamiento lazy para archivos grandes
+                df_dict = pl.read_excel(file_path, sheet_name=sheet_name, read_options=read_options)
+                
+                # Seleccionar hoja
+                if isinstance(df_dict, dict):
+                    sheet_name = list(df_dict.keys())[0]
+                    df_pl = df_dict[sheet_name].lazy()
+                else:
+                    df_pl = df_dict.lazy()
+
+                # Normalizar columnas
+                df_pl = df_pl.rename({
+                    col: self._normalize_column_name(col) 
+                    for col in df_pl.collect_schema().keys()
+                })
+
+                # Materializar
+                df_pd = df_pl.collect(streaming=True).to_pandas()
+
+            else:
+                # Lectura simple para archivos pequeños
+                df_pl = pl.read_excel(
+                    file_path, 
+                    sheet_name=sheet_name, 
+                    read_options=read_options
+                )
+                
+                # Convertir a pandas
+                df_pd = df_pl.to_pandas()
+
+            # Normalizar columnas
             df_pd.columns = [
-                str(col).strip().upper().replace('\n', '').replace('\r', '')
-                .replace('\t', '').replace('  ', ' ')
+                self._normalize_column_name(str(col)) 
                 for col in df_pd.columns
             ]
-            
-            # 5. Eliminar columnas sin nombre igual que antes
-            df_pd = df_pd.loc[:, ~df_pd.columns.str.contains('^Unnamed:', na=False)]
-            
-            elapsed = time.time() - start_time
-            print(f"Archivo leído con Polars en {elapsed:.2f} segundos")
-            
-            return df_pd
-            
-        except Exception as e:
-            print(f"Error leyendo con Polars: {str(e)}")
-            return None
-        
-    def _read_with_polars_lazy(self,file_path: Path, is_inventory: bool = False, sheet_name: Optional[str] = None) -> pd.DataFrame:
-        """
-        Lee archivos Excel con Polars LazyFrame para rendimiento mejorado:
-        - Utiliza evaluación diferida para optimizar procesamiento
-        - Aplica predicados y proyecciones para reducir la carga de memoria
-        - Materializa el dataframe solo cuando es necesario
-        """
-        
-        logger.info(f"Leyendo archivo con Polars LazyFrame: {file_path}")
-        start_time = time.time()
-        
-        try:
-            # 1. Leer con Polars
-            df_dict = pl.read_excel(
-                file_path,
-                sheet_name=sheet_name,
-                read_options={"skip_rows": 1, "header_row": 1}  # Argumentos correctos en Polars 1.26
-            )
 
-            # 2. Seleccionar la hoja
-            if isinstance(df_dict, dict):
-                sheet_name = list(df_dict.keys())[0]  # Tomar la primera hoja si hay varias
-                df_pl = df_dict[sheet_name]
-            else:
-                df_pl = df_dict  # Ya es un DataFrame si solo hay una hoja
-
-            df_pl = df_pl.lazy()  # Convertir a LazyFrame
-
-            # 3. Procesar nombres de columnas en modo lazy
-            # Obtener el esquema de manera eficiente
-            schema = df_pl.collect_schema()
-            col_names = list(schema.keys())
-
-            # Normalizar nombres de columnas
-            normalized_names = [
-                str(col).strip().upper().replace('\n', '').replace('\r', '')
-                .replace('\t', '').replace('  ', ' ')
-                for col in col_names
-            ]
-
-            # Renombrar columnas manteniendo operación lazy
-            rename_dict = {old: new for old, new in zip(col_names, normalized_names)}
-            df_pl = df_pl.rename(rename_dict)
-
-            # Filtrar columnas sin nombre (modo lazy)
-            unnamed_cols = [col for col in df_pl.collect_schema().keys() if 'UNNAMED:' in col.upper()]
-            if unnamed_cols:
-                df_pl = df_pl.drop(unnamed_cols)
-
-
-            # 5. Materializar y convertir a pandas solo al final
-            df_pd = df_pl.collect(streaming=True).to_pandas()
+            # Eliminar columnas sin nombre
+            df_pd = df_pd.loc[:, ~df_pd.columns.str.contains('^UNNAMED:', case=False, na=False)]
 
             elapsed = time.time() - start_time
-            logger.info(f"Archivo leído con Polars LazyFrame en {elapsed:.2f} segundos")
-            logger.debug(f"Forma del DataFrame: {df_pd.shape}")
-
+            logger.info(f"Archivo leído con Polars en {elapsed:.2f} segundos. Modo: {read_mode}")
+            
             return df_pd
 
         except Exception as e:
-            logger.error(f"Error leyendo con Polars LazyFrame: {str(e)}")
-            logger.error(f"Detalles: {traceback.format_exc()}")
+            logger.error(f"Error leyendo archivo con Polars: {str(e)}")
+            logger.error(traceback.format_exc())
             return None
 
-                
     def read_excel_file(
         self, 
         file_path: Path,
@@ -305,153 +283,55 @@ class ExcelRepository:
         sheet_name: Optional[str] = None,
         **kwargs
     ) -> pd.DataFrame:
-        """
-        Lee archivo Excel utilizando la estrategia óptima basada en el tamaño y tipo.
-        """
-        # Inicio: Logging de información básica
-        logger.info(f"Iniciando lectura de archivo Excel")
-        logger.info(f"Ruta del archivo: {file_path}")
+        # Intentar leer con Polars primero
+        df = self._read_with_polars(file_path, is_inventory, sheet_name)
         
-        # Normalizar path
+        # Fallback a Pandas si Polars falla
+        if df is None:
+            logger.warning("Fallback a lectura con Pandas")
+            df = pd.read_excel(
+                file_path, 
+                skiprows=1, 
+                sheet_name=sheet_name, 
+                engine='openpyxl',
+                dtype=str
+            )
+            
+            # Normalizar columnas
+            df.columns = [self._normalize_column_name(str(col)) for col in df.columns]
+            df = df.loc[:, ~df.columns.str.contains('^UNNAMED:', case=False, na=False)]
+        
+        return df
+            
+    def validate_and_read_file(self, file_path: Union[str, Path], **kwargs) -> pd.DataFrame:
+        # Convertir a Path si es string
         file_path = Path(file_path) if isinstance(file_path, str) else file_path
         
-        # Validar existencia del archivo
-        if not file_path.exists():
-            raise ValueError(f"Archivo no encontrado: {file_path}")
+        # Generar clave de caché más robusta
+        cache_key = (
+            str(file_path), 
+            kwargs.get('is_inventory', False), 
+            kwargs.get('sheet_name')
+        )
         
-        # Calcular tamaño del archivo
-        file_size_mb = file_path.stat().st_size / (1024 * 1024)
-        logger.info(f"Tamaño del archivo: {file_size_mb:.2f} MB")
+        # Intentar obtener del caché
+        cached_df = self._dataframe_cache.get(cache_key)
+        if cached_df is not None:
+            logger.info(f"Datos recuperados del caché para: {file_path}")
+            return cached_df.copy()
         
-        # Manejar selección de hoja
-        with pd.ExcelFile(file_path) as xl:
-            sheets = xl.sheet_names
-            logger.debug(f"Hojas disponibles: {sheets}")
-            
-            # Seleccionar hoja por defecto
-            if not sheet_name and len(sheets) > 0:
-                sheet_name = sheets[0]
-                logger.info(f"Seleccionada primera hoja: {sheet_name}")
-            
-            # Validar hoja seleccionada
-            if sheet_name and sheet_name not in sheets:
-                raise ValueError(f"Hoja '{sheet_name}' no encontrada. Hojas disponibles: {sheets}")
+        # Leer y validar archivo
+        df = self.read_excel_file(file_path, **kwargs)
         
-        # Lectura basada en tamaño y tipo
-        try:
-            # Estrategia para archivos grandes o de inventario
-            if file_size_mb > 1 or is_inventory:
-                try:                    
-                    # Leer con Polars
-                    df_pl = pl.read_excel(
-                        file_path,
-                        sheet_name=sheet_name,
-                        read_options={"skip_rows": 1, "header_row": 1}  # Argumentos correctos en Polars 1.26
-                    )
-                                        
-                    # Normalizar columnas
-                    df_pl = df_pl.rename({
-                        col: self._normalize_column_name(col) 
-                        for col in df_pl.columns
-                    })
-                    
-                    # Convertir a pandas
-                    df = df_pl.to_pandas()
-                                        
-                except Exception as e:
-                    logger.warning(f"Error con Polars: {str(e)}. Usando pandas como fallback.")
-                    logger.debug(f"Detalle de error Polars: {traceback.format_exc()}")
-                    
-                    # Fallback a Pandas
-                    df = pd.read_excel(
-                        file_path, 
-                        skiprows=1, 
-                        sheet_name=sheet_name, 
-                        engine='openpyxl',
-                        dtype=str  # Forzar lectura como string
-                    )
-            else:
-                # Para archivos pequeños, usar pandas directamente
-                logger.info("Usando lectura directa con Pandas")
-                df = pd.read_excel(
-                    file_path, 
-                    skiprows=1, 
-                    sheet_name=sheet_name, 
-                    engine='openpyxl',
-                    dtype=str  # Forzar lectura como string
-                )
-            
-            # Normalizar columnas en caso de pandas
-            if isinstance(df, pd.DataFrame):
-                
-                # Normalización de columnas
-                df.columns = [self._normalize_column_name(str(col)) for col in df.columns]
-                
-                # Eliminar columnas sin nombre
-                df = df.loc[:, ~df.columns.str.contains('^UNNAMED:', case=False, na=False)]
-            
-            logger.info(f"Lectura de archivo completada exitosamente. Filas: {len(df)}")
-            return df
-        
-        except Exception as e:
-            logger.error(f"Error crítico leyendo archivo Excel {file_path}")
-            logger.error(f"Mensaje de error: {str(e)}")
-            logger.error(f"Detalle técnico: {traceback.format_exc()}")
-            raise
-            
-    def validate_and_read_file(self, file_path: Union[str, Path], is_inventory: bool = False, sheet_name: Optional[str] = None, column_mapping: Optional[Dict[str, str]] = None) -> pd.DataFrame:
-        """
-        Valida y lee un archivo Excel en una sola operación, optimizando el rendimiento.
-        Utiliza caché para evitar lecturas repetidas.
-        
-        Args:
-            file_path: Ruta del archivo a leer
-            is_inventory: Indica si es un archivo de inventario
-            sheet_name: Nombre de la hoja a leer
-            
-        Returns:
-            DataFrame con los datos del archivo
-            
-        Raises:
-            ValueError: Si el archivo no cumple con los requisitos de validación
-        """
-        # Normalizar path para clave de caché
-        if isinstance(file_path, str):
-            file_path = Path(file_path)
-        
-        # Crear clave única para el caché
-        cache_key = f"{str(file_path)}_{is_inventory}_{sheet_name}"
-        
-        # Verificar si ya tenemos este archivo en caché
-        if cache_key in self._dataframe_cache:
-            logger.info(f"Usando datos en caché para: {file_path}")
-            return self._dataframe_cache[cache_key].copy()
-        
-        # Validación básica antes de leer
-        self._validate_file_basics(file_path)
-        
-        # Lectura del archivo
-        df = self.read_excel_file(file_path, is_inventory=is_inventory, sheet_name=sheet_name)
-        
-        # Validación específica según el tipo de archivo
-        if is_inventory:
+        # Validar según tipo de archivo
+        if kwargs.get('is_inventory', False):
             self._validate_inventory_columns(df)
         else:
             self._validate_audit_columns(df)
         
-        # Aplicar mapeo de columnas si se proporciona (nuevo paso)
-        if column_mapping:
-            # Crear un diccionario de renombramiento basado en las columnas actuales
-            rename_dict = {original: mapped for original, mapped in column_mapping.items() if original in df.columns}
-            if rename_dict:
-                df = df.rename(columns=rename_dict)
-                logger.info(f"Columnas renombradas: {rename_dict}")
-        
         # Guardar en caché
-        self._dataframe_cache[cache_key] = df.copy()
-        self._validation_results[cache_key] = True
+        self._dataframe_cache.set(cache_key, df.copy())
         
-        logger.info(f"Archivo validado y cacheado: {file_path}")
         return df
     
     def _validate_dataframe(
