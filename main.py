@@ -3,6 +3,7 @@ from pathlib import Path
 import logging
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
+from PyQt6.QtWidgets import QApplication
 
 # Configure PYTHONPATH
 project_root = Path(__file__).parent.absolute()
@@ -87,7 +88,7 @@ class AuditProcessApp:
         
         finally:
             self.logger.info("Initialization process completed")
-
+ 
     def cleanup(self) -> None:
         """Clean up application resources"""
         try:
@@ -100,16 +101,20 @@ class AuditProcessApp:
 
 def main():
     """Main entry point"""
-    app = AuditProcessApp()
+    # Crear QApplication ANTES de inicializar cualquier componente
+    app = QApplication(sys.argv)
+    
+    audit_process_app = AuditProcessApp()
     try:
-        view = app.initialize()
+        view = audit_process_app.initialize()
         if view:
-            view.run()
+            view.show()  # Cambiar run() por show()
+            sys.exit(app.exec())  # Manejar el event loop aquí
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}")
         input("Press Enter to exit...")
     finally:
-        app.cleanup()
+        audit_process_app.cleanup()
         logger.info("Application terminated")
 
 if __name__ == "__main__":

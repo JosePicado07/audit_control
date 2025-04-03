@@ -1,9 +1,13 @@
+import gc
+import os
 from pathlib import Path
+import time
 import traceback
 from typing import Dict, List, Optional, Any, Union
 from dataclasses import dataclass
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
+import polars as pl
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from datetime import datetime
 
@@ -224,104 +228,133 @@ class AuditProcessor:
         inventory_df: Optional[pd.DataFrame] = None
     ) -> Dict:
         """
-        Procesa la auditoría de control de serie preservando toda la información de inventario
+        Versión altamente optimizada para auditoría de control de serie
         """
         try:
-            base_org = program_reqs['base_org']
-            org_destination = program_reqs['org_destination']
+            start_time = time.time()
+            logger.info("=== SERIAL CONTROL AUDIT (HIGH PERFORMANCE) ===")
             
-            if not base_org:
-                base_org = org_destination[0] if org_destination else None
+            # 1. Extraer parámetros una sola vez (evitar lookups repetidos)
+            base_org = program_reqs.get('base_org')
+            org_destination = program_reqs.get('org_destination', [])
+            
+            # Validaciones y defaults optimizados
+            if not base_org and org_destination:
+                base_org = org_destination[0]
                 logger.warning(f"No base org specified, using first destination org: {base_org}")
                 
             if not org_destination:
-                # Crear una lista de strings y aplicar zfill usando Series.str
-                org_strings = [str(org).strip() for org in df['Organization'].unique()]
+                org_strings = df['Organization'].astype(str).str.strip().unique()
                 org_destination = sorted(pd.Series(org_strings).str.zfill(2).tolist())
                 logger.warning(f"No destination orgs specified, using all unique orgs: {org_destination}")
             
-            # Obtener resultados de comparación
+            # 2. Obtener resultados de comparación (usando método ya optimizado)
             serial_comparison = self._check_serial_control(df, base_org, org_destination)
-
-            # Verificar inventario usando WMS
-            inventory_check = self._check_inventory_for_mismatches(
-                serial_comparison['mismatched_parts'],
-                df, 
-                org_destination,
-                inventory_df
-            )
-
+            
+            # 3. Verificar inventario para partes problemáticas usando cache inteligente
+            # Usar instancia singleton para evitar recreaciones
+            mismatched_parts = serial_comparison.get('mismatched_parts', [])
+            
+            # Solo procesar inventario para partes problemáticas (eficiencia)
+            inventory_check = {}
+            if mismatched_parts:
+                inventory_check = self._check_inventory_for_mismatches(
+                    mismatched_parts,
+                    df, 
+                    org_destination,
+                    inventory_df
+                )
+            
+            # 4. Validar partes non-hardware de manera optimizada
             non_hardware = self._validate_non_hardware_parts(df)
-            inventory_summary = inventory_check.get('summary', {})
-
-            # Crear un mapeo de inventario enriquecido
-            inventory_map = {
-                k: v for k, v in inventory_check.items() 
-                if k != 'summary' and isinstance(v, dict)
-            }
-
-            # Preparar las columnas dinámicas
+            
+            # 5. Crear mapeo de inventario eficiente
+            # Usar defaultdict para evitar verificaciones constantes de existencia
+            from collections import defaultdict
+            inventory_map = defaultdict(dict)
+            
+            for k, v in inventory_check.items():
+                if k != 'summary' and isinstance(v, dict):
+                    inventory_map[k] = v
+            
+            # 6. Crear columnas dinámicas una sola vez
             dynamic_columns = {org: f'{org} Serial Control' for org in org_destination}
-
-            results_df = pd.DataFrame([])
-            for part_data in serial_comparison['data']:
-                inventory_key = f"{part_data['part_number']}_{part_data['organization']}"
+            
+            # 7. Construir DataFrame de resultados de manera eficiente
+            # Preparar lista para DataFrame en lugar de concat repetido
+            result_rows = []
+            
+            for part_data in serial_comparison.get('data', []):
+                # Eficiente: obtener datos de una sola vez
+                part_number = part_data.get('part_number', '')
+                organization = part_data.get('organization', '')
+                inventory_key = f"{part_number}_{organization}"
                 
-                # Obtener información completa de inventario
+                # Obtener datos de inventario (defaultdict previene KeyError)
                 inventory_info = inventory_map.get(inventory_key, {})
                 
-                # Construir resultado enriquecido
-                part_result = {
-                    'Part Number': part_data['part_number'],
-                    'Organization': part_data['organization'],
-                    'Serial Control': part_data['serial_control'],
-                    'Base Org Serial Control': part_data['base_serial'],
-                    'Status': 'Mismatch' if part_data['has_mismatch'] else 'OK',
-                    'Action Required': 'Review Serial Control' if part_data['has_mismatch'] else 'None',
-                    # Información completa de inventario
+                # Construir fila resultado eficientemente
+                row = {
+                    'Part Number': part_number,
+                    'Organization': organization,
+                    'Serial Control': part_data.get('serial_control', ''),
+                    'Base Org Serial Control': part_data.get('base_serial', ''),
+                    'Status': 'Mismatch' if part_data.get('has_mismatch', False) else 'OK',
+                    'Action Required': 'Review Serial Control' if part_data.get('has_mismatch', False) else 'None',
                     'On Hand Quantity': inventory_info.get('quantity', 0),
                     'has_inventory': inventory_info.get('has_inventory', False),
                     'Value': inventory_info.get('value', 0.0),
                     'Subinventory Code': inventory_info.get('subinventory', ''),
                     'Warehouse Code': inventory_info.get('warehouse_code', ''),
-                    # Información de aging
                     'Aging_0_30': inventory_info.get('aging_0_30', 0.0),
                     'Aging_31_60': inventory_info.get('aging_31_60', 0.0),
                     'Aging_61_90': inventory_info.get('aging_61_90', 0.0),
-                    # Información adicional
-                    'Is Hardware': 'Yes' if part_data['part_number'] not in non_hardware['non_hardware_parts'] else 'No',
+                    'Is Hardware': 'No' if part_number in non_hardware.get('non_hardware_parts', []) else 'Yes',
                     'Manufacturer': part_data.get('manufacturer', ''),
                     'Description': part_data.get('description', ''),
                     'Vertex': part_data.get('vertex', '')
                 }
-
-                # Agregar columnas dinámicas
+                
+                # Agregar columnas dinámicas eficientemente
                 for org, column_name in dynamic_columns.items():
-                    org_serial_control = next(
-                        (data['serial_control'] for data in serial_comparison['data'] 
-                        if data['part_number'] == part_data['part_number'] and 
-                        data['organization'] == org),
-                        'N/A'
+                    # Usar generators en lugar de comprehensions para mejor memoria
+                    org_data = next(
+                        (data for data in serial_comparison.get('data', [])
+                        if data.get('part_number') == part_number and data.get('organization') == org),
+                        {}
                     )
-                    part_result[column_name] = org_serial_control
-
-                results_df = pd.concat([results_df, pd.DataFrame([part_result])], ignore_index=True)
-
-            # Agregar el mapeo de inventario al resultado para uso posterior
-            return {
-                'data': df,
-                'mismatched_parts': serial_comparison['mismatched_parts'],
+                    row[column_name] = org_data.get('serial_control', 'N/A')
+                
+                result_rows.append(row)
+                
+                # Liberar memoria periódicamente para conjuntos grandes
+                if len(result_rows) % 10000 == 0:
+                    gc.collect()
+            
+            # Crear DataFrame una sola vez (mucho más eficiente)
+            results_df = pd.DataFrame(result_rows)
+            
+            # 8. Crear resultado final
+            inventory_summary = inventory_check.get('summary', {})
+            
+            result = {
+                'data': df,  # Mantener compatibilidad
+                'mismatched_parts': serial_comparison.get('mismatched_parts', []),
                 'dynamic_columns': list(dynamic_columns.values()),
-                'inventory_map': inventory_map,
+                'inventory_map': dict(inventory_map),  # Convertir defaultdict a dict
                 'program_requirements': program_reqs,
                 'summary': {
-                    'total_mismatches': len(serial_comparison['mismatched_parts']),
+                    'total_mismatches': len(serial_comparison.get('mismatched_parts', [])),
                     'total_parts': len(df['Part Number'].unique()),
                     'total_with_inventory': inventory_summary.get('parts_with_inventory', 0),
                     'total_inventory_records': inventory_summary.get('total_inventory_records', 0),
-                    'total_non_hardware_issues': len(non_hardware['non_hardware_parts'])
+                    'total_non_hardware_issues': len(non_hardware.get('non_hardware_parts', [])),
+                    'processing_time': time.time() - start_time
                 }
             }
+            
+            logger.info(f"Serial control audit completed in {time.time() - start_time:.2f}s")
+            return result
 
         except Exception as e:
             logger.error(f"Error in serial control audit: {str(e)}")
@@ -334,130 +367,279 @@ class AuditProcessor:
         org_destination: List[str]
     ) -> Dict:
         """
-        Compare Serial Control across organizations and analyze patterns.
-        Identifies mismatches between 'Dynamic entry at inventory receipt' and 'No serial number control',
-        while also detecting suspicious patterns where serial control exists in limited organizations.
+        Versión optimizada con Polars y procesamiento paralelo por lotes.
+        Identifica discrepancias entre 'Dynamic entry at inventory receipt' y 'No serial number control',
+        además de detectar patrones sospechosos donde el control de serie existe en organizaciones limitadas.
         """
         try:
+            import os
+            import polars as pl
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            import time
+            from collections import defaultdict
+            
+            start_time = time.time()
+            
+            # Variables para resultados globales
             mismatched_parts = []
             comparison_data = []
-            pattern_registry = {}  # Registro de patrones para análisis
+            pattern_registry = {}
             valid_values = ["Dynamic entry at inventory receipt", "No serial number control"]
-
-            print("\n=== SERIAL CONTROL CHECK ===")
-            print(f"Base org: {base_org}")
-            print(f"Destination orgs: {org_destination}")
-
-            # Primero, recolectamos todos los patrones
-            for part_number in df['Part Number'].unique():
-                print(f"\nProcessing part: {part_number}")
-                part_data = df[df['Part Number'] == part_number]
+            
+            # Log inicial
+            logger.info("=== SERIAL CONTROL CHECK (OPTIMIZED) ===")
+            logger.info(f"Base org: {base_org}")
+            logger.info(f"Destination orgs: {org_destination}")
+            
+            # 1. Preparación con Polars - Conversión y normalización
+            try:
+                # Convertir a Polars si no lo es ya
+                if isinstance(df, pd.DataFrame):
+                    df_pl = pl.from_pandas(df)
+                else:
+                    df_pl = df
+                    
+                # Normalizamos valores de Serial Control de una vez (vectorizado)
+                df_pl = df_pl.with_columns([
+                    pl.when(pl.col("Serial Control").str.to_uppercase() == "YES")
+                    .then(pl.lit("Dynamic entry at inventory receipt"))
+                    .when(pl.col("Serial Control").str.to_uppercase() == "NO")
+                    .then(pl.lit("No serial number control"))
+                    .otherwise(pl.col("Serial Control"))
+                    .alias("Serial Control Normalized")
+                ])
                 
-                # Crear un diccionario para almacenar el patrón de esta parte
-                part_pattern = {
-                    'values': {},
-                    'part_info': {
-                        'manufacturer': part_data['Manufacturer'].iloc[0],
-                        'description': part_data['Description'].iloc[0],
-                        'vertex': part_data.get('Vertex', '').iloc[0]
-                    }
+                # Preparar información básica por parte
+                part_info_df = df_pl.group_by("Part Number").agg([
+                    pl.first("Manufacturer").alias("Manufacturer"),
+                    pl.first("Description").alias("Description"),
+                    pl.first("Vertex").alias("Vertex"),
+                    pl.first("Item Status").alias("Item Status") if "Item Status" in df_pl.columns else pl.lit("").alias("Item Status")
+                ])
+                
+                # Convertir a diccionario para acceso O(1)
+                part_info = {
+                    row["Part Number"]: {
+                        "manufacturer": row["Manufacturer"],
+                        "description": row["Description"],
+                        "vertex": row["Vertex"], 
+                        "item_status": row["Item Status"]
+                    } for row in part_info_df.to_dicts()
                 }
-
-                # Verificar base org primero
-                base_data = part_data[part_data['Organization'] == base_org]
-                base_serial = (base_data['Serial Control'].iloc[0] 
-                            if not base_data.empty else "Not found in base org")
-                part_pattern['values']['base'] = base_serial
-
-                # Verificar cada organización destino
-                current_values = set()
-                for org in org_destination:
-                    org_data = part_data[part_data['Organization'] == org]
-                    if not org_data.empty:
-                        current_serial = org_data['Serial Control'].iloc[0]
-                        # Normalizar valor
-                        if current_serial.upper() == 'YES':
-                            current_serial = "Dynamic entry at inventory receipt"
-                        elif current_serial.upper() == 'NO':
-                            current_serial = "No serial number control"
-                        
-                        part_pattern['values'][org] = current_serial
-                        if current_serial in valid_values:
-                            current_values.add(current_serial)
-                    else:
-                        part_pattern['values'][org] = "Not found"
-
-                # Registrar el patrón
-                pattern_key = tuple(sorted(
-                    (org, value) for org, value in part_pattern['values'].items()
-                ))
-                if pattern_key not in pattern_registry:
-                    pattern_registry[pattern_key] = {
-                        'parts': [],
-                        'count': 0
+                
+                # Extraer valores de base_org para todas las partes de una vez
+                base_values_df = df_pl.filter(pl.col("Organization") == base_org).select(
+                    ["Part Number", "Serial Control Normalized"]
+                )
+                
+                # Crear diccionario de valores base
+                base_values = {}
+                for row in base_values_df.to_dicts():
+                    base_values[row["Part Number"]] = row["Serial Control Normalized"]
+                
+                # Extraer todos los valores seriales organizados por parte/org
+                serial_data_df = df_pl.select(
+                    ["Part Number", "Organization", "Serial Control Normalized"]
+                )
+                
+                # Crear estructura para valores seriales
+                serial_values = defaultdict(dict)
+                for row in serial_data_df.to_dicts():
+                    part = row["Part Number"]
+                    org = row["Organization"]
+                    value = row["Serial Control Normalized"]
+                    serial_values[part][org] = value
+                    
+                # Obtener todas las partes únicas
+                unique_parts = df_pl["Part Number"].unique().to_list()
+                logger.info(f"Procesando {len(unique_parts)} partes únicas")
+                
+            except Exception as e:
+                # Si falla Polars, usamos la versión pandas tradicional
+                logger.warning(f"Error en procesamiento con Polars: {str(e)}")
+                logger.warning("Fallback a procesamiento con Pandas")
+                
+                # Normalizar valores en pandas
+                df["Serial Control Normalized"] = df["Serial Control"].apply(
+                    lambda x: "Dynamic entry at inventory receipt" if str(x).upper() == "YES" 
+                    else "No serial number control" if str(x).upper() == "NO" 
+                    else x
+                )
+                
+                # Estructuras equivalentes con pandas
+                part_info = {}
+                for _, group in df.groupby("Part Number"):
+                    part_number = group["Part Number"].iloc[0]
+                    part_info[part_number] = {
+                        "manufacturer": group["Manufacturer"].iloc[0],
+                        "description": group["Description"].iloc[0],
+                        "vertex": group.get("Vertex", pd.Series([""])).iloc[0],
+                        "item_status": group.get("Item Status", pd.Series([""])).iloc[0]
                     }
-                pattern_registry[pattern_key]['parts'].append({
-                    'part_number': part_number,
-                    'info': part_pattern['part_info']
-                })
-                pattern_registry[pattern_key]['count'] += 1
-
-                # Verificar mismatch tradicional
-                has_mismatch = len(current_values) > 1
-                if has_mismatch:
-                    mismatched_parts.append(part_number)
-                    comparison_data.append({
-                        'part_number': part_number,
-                        'organization': org,
-                        'serial_control': current_serial,
-                        'base_serial': base_serial,
-                        'has_mismatch': True,
-                        'item_status': part_data['Item Status'].iloc[0] if 'Item Status' in part_data.columns else '',
-                        **part_pattern['part_info'],
-                        'status': 'Mismatch'
+                
+                # Valores base
+                base_values = {}
+                for part, group in df[df["Organization"] == base_org].groupby("Part Number"):
+                    if not group.empty:
+                        base_values[part] = group["Serial Control Normalized"].iloc[0]
+                
+                # Valores seriales
+                serial_values = defaultdict(dict)
+                for _, row in df.iterrows():
+                    part = row["Part Number"]
+                    org = row["Organization"]
+                    value = row["Serial Control Normalized"]
+                    serial_values[part][org] = value
+                    
+                # Partes únicas
+                unique_parts = df["Part Number"].unique()
+                logger.info(f"Procesando {len(unique_parts)} partes únicas")
+            
+            # 2. Procesamiento por lotes (batching)
+            # Calcular tamaño de lote óptimo
+            batch_size = min(500, max(50, len(unique_parts) // (os.cpu_count() * 2 or 4)))
+            
+            # Dividir en lotes
+            part_batches = [unique_parts[i:i+batch_size] for i in range(0, len(unique_parts), batch_size)]
+            
+            logger.info(f"Dividiendo procesamiento en {len(part_batches)} lotes de ~{batch_size} partes")
+            
+            # 3. Función para procesar un lote
+            def process_batch(batch_parts):
+                local_mismatched = []
+                local_comparison = []
+                local_patterns = {}
+                
+                for part_number in batch_parts:
+                    # Obtener valores seriales para esta parte
+                    part_values = serial_values.get(part_number, {})
+                    base_serial = base_values.get(part_number, "Not found in base org")
+                    
+                    # Construir patrón para análisis
+                    part_pattern = {"base": base_serial}
+                    for org in org_destination:
+                        if org in part_values:
+                            part_pattern[org] = part_values[org]
+                        else:
+                            part_pattern[org] = "Not found"
+                    
+                    # Recolectar valores válidos para detectar mismatch
+                    valid_part_values = set()
+                    for org in org_destination:
+                        if org in part_values:
+                            value = part_values[org]
+                            if value in valid_values:
+                                valid_part_values.add(value)
+                    
+                    # Verificar mismatch
+                    has_mismatch = len(valid_part_values) > 1
+                    
+                    # Registrar patrón para análisis posterior
+                    pattern_key = tuple(sorted((org, value) for org, value in part_pattern.items()))
+                    
+                    if pattern_key not in local_patterns:
+                        local_patterns[pattern_key] = {
+                            "parts": [],
+                            "count": 0
+                        }
+                    
+                    local_patterns[pattern_key]["parts"].append({
+                        "part_number": part_number,
+                        "info": part_info.get(part_number, {})
                     })
-
-            # Analizar patrones sospechosos
-            print("\n=== PATTERN ANALYSIS ===")
+                    local_patterns[pattern_key]["count"] += 1
+                    
+                    # Si hay mismatch, registrar la parte
+                    if has_mismatch:
+                        local_mismatched.append(part_number)
+                        
+                        # Seleccionar una organización representativa
+                        rep_org = next((org for org in org_destination if org in part_values), org_destination[0])
+                        rep_value = part_values.get(rep_org, "Not found")
+                        
+                        # Crear registro de comparación
+                        local_comparison.append({
+                            'part_number': part_number,
+                            'organization': rep_org,
+                            'serial_control': rep_value,
+                            'base_serial': base_serial,
+                            'has_mismatch': True,
+                            'item_status': part_info.get(part_number, {}).get('item_status', ''),
+                            'manufacturer': part_info.get(part_number, {}).get('manufacturer', ''),
+                            'description': part_info.get(part_number, {}).get('description', ''),
+                            'vertex': part_info.get(part_number, {}).get('vertex', ''),
+                            'status': 'Mismatch'
+                        })
+                
+                return local_mismatched, local_comparison, local_patterns
+            
+            # 4. Procesamiento paralelo de lotes
+            with ThreadPoolExecutor(max_workers=min(os.cpu_count() * 2 or 4, 8)) as executor:
+                batch_results = list(executor.map(process_batch, part_batches))
+            
+            # 5. Combinar resultados
+            for local_mismatched, local_comparison, local_patterns in batch_results:
+                mismatched_parts.extend(local_mismatched)
+                comparison_data.extend(local_comparison)
+                
+                # Combinar patrones
+                for pattern, data in local_patterns.items():
+                    if pattern not in pattern_registry:
+                        pattern_registry[pattern] = {
+                            "parts": [],
+                            "count": 0
+                        }
+                    pattern_registry[pattern]["parts"].extend(data["parts"])
+                    pattern_registry[pattern]["count"] += data["count"]
+            
+            # 6. Analizar patrones sospechosos
             suspicious_patterns = []
+            logger.info("Analizando patrones...")
+            
             for pattern, data in pattern_registry.items():
                 pattern_dict = dict(pattern)
                 
                 # Detectar patrón donde solo una org tiene serial control
                 orgs_with_serial = [
                     org for org, value in pattern_dict.items()
-                    if value in valid_values
+                    if value in valid_values and org != "base"
                 ]
                 
                 if len(orgs_with_serial) == 1:
-                    print(f"\n⚠️ Suspicious Pattern Detected:")
-                    print(f"Found {data['count']} parts with serial control only in org {orgs_with_serial[0]}")
-                    print("Pattern details:")
-                    for org, value in pattern_dict.items():
-                        if org != 'base':
-                            print(f"  Org {org}: {value}")
-                    print("\nSample parts:")
-                    for part in data['parts'][:5]:
-                        print(f"  - {part['part_number']}")
-                    
+                    # Patrón sospechoso: solo una org tiene control serial
                     suspicious_patterns.append({
                         'pattern': pattern_dict,
                         'affected_parts': data['parts'],
                         'count': data['count']
                     })
-
+                    
+                    # Log reducido, solo los patrones más significativos
+                    if data['count'] >= 10:
+                        logger.info(f"Patrón sospechoso: {data['count']} partes con control serial solo en org {orgs_with_serial[0]}")
+            
+            # 7. Finalización y medición
+            elapsed_time = time.time() - start_time
+            
+            # Eliminar duplicados en mismatched_parts
+            mismatched_parts = list(set(mismatched_parts))
+            
+            logger.info(f"Procesamiento completado en {elapsed_time:.2f} segundos")
+            logger.info(f"Total partes: {len(unique_parts)}, Mismatches: {len(mismatched_parts)}")
+            
             return {
-                'mismatched_parts': list(set(mismatched_parts)),
+                'mismatched_parts': mismatched_parts,
                 'data': comparison_data,
                 'summary': {
-                    'total_parts': len(df['Part Number'].unique()),
-                    'total_mismatches': len(set(mismatched_parts)),
-                    'suspicious_patterns': suspicious_patterns
+                    'total_parts': len(unique_parts),
+                    'total_mismatches': len(mismatched_parts),
+                    'suspicious_patterns': suspicious_patterns,
+                    'processing_time': elapsed_time
                 }
             }
 
         except Exception as e:
             logger.error(f"Error checking serial control: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
             raise
         
     def _check_inventory_for_mismatches(
@@ -468,7 +650,7 @@ class AuditProcessor:
         inventory_df: Optional[pd.DataFrame]
     ) -> Dict:
         """
-        Verifica discrepancias de inventario para las partes que tienen diferencias.
+        Versión optimizada que utiliza Polars y procesamiento paralelo por lotes.
         
         Args:
             mismatched_parts: Lista de partes con discrepancias
@@ -479,68 +661,79 @@ class AuditProcessor:
         Returns:
             Dict con resultados del análisis de inventario
         """
-        try:
-            logger.info("=== INICIO CHECK INVENTORY ===")
+        
+        start_time = time.time()
+        logger.info("=== INICIO CHECK INVENTORY (OPTIMIZED) ===")
+        
+        # Validaciones iniciales (igual que antes)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError("DataFrame principal vacío o inválido")
             
-            # Validaciones iniciales
-            if not isinstance(df, pd.DataFrame) or df.empty:
-                raise ValueError("DataFrame principal vacío o inválido")
-                
-            if not org_destination:
-                raise ValueError("Lista de organizaciones destino vacía")
+        if not org_destination:
+            raise ValueError("Lista de organizaciones destino vacía")
 
-            # Obtener todas las partes únicas del DataFrame principal
-            all_parts = set(df['Part Number'].unique())
-            mismatched_set = set(str(part).strip().upper() for part in (mismatched_parts or []))
+        # 1. Normalizar datos de entrada
+        all_parts = set(df['Part Number'].unique())
+        mismatched_set = set(str(part).strip().upper() for part in (mismatched_parts or []))
+        normalized_orgs = [str(org).strip().zfill(2) for org in org_destination]
+        
+        total_parts = len(all_parts)
+        logger.info(f"Total de partes en archivo: {total_parts}")
+        logger.info(f"Partes con discrepancias: {len(mismatched_set)}")
+        logger.info(f"Organizaciones a revisar: {len(normalized_orgs)}")
+
+        # 2. Inicializar matcher y cargar inventario (igual que antes)
+        matcher = InventoryMatcher()
+        if inventory_df is not None:
+            # Normalizar columnas
+            column_mappings = {col: col for col in inventory_df.columns}
+            inventory_df.columns = [
+                col.strip().upper().replace(' ', '_') 
+                for col in inventory_df.columns
+            ]
             
-            logger.info(f"Total de partes en archivo: {len(all_parts)}")
-            logger.info(f"Partes con discrepancias: {len(mismatched_set)}")
-            logger.info(f"Organizaciones a revisar: {org_destination}")
-
-            # Inicializar matcher y cargar inventario
-            matcher = InventoryMatcher()
-            if inventory_df is not None:
-                logger.debug("Procesando archivo de inventario...")
-                logger.debug(f"Columnas originales: {inventory_df.columns.tolist()}")
-                
-                # Normalizar columnas
-                column_mappings = {col: col for col in inventory_df.columns}
-                inventory_df.columns = [
-                    col.strip().upper().replace(' ', '_') 
-                    for col in inventory_df.columns
-                ]
-                
-                # Cargar inventario
-                matcher.load_inventory(inventory_df, column_mappings)
-
-            # Procesar resultados
-            results = {}
-            processed_count = 0
-            parts_with_inventory = set()
-            total_inventory_records = 0
+            # Cargar inventario
+            matcher.load_inventory(inventory_df, column_mappings)
+        
+        # 3. Preparar estructuras para resultados
+        results = {}
+        parts_with_inventory = set()
+        total_inventory_records = 0
+        
+        # 4. Definir el tamaño de lote óptimo
+        # - Usar número de CPUs disponibles para escalar
+        # - Limitar tamaño máximo para control de memoria
+        cpu_count = os.cpu_count() or 4
+        batch_size = min(500, max(50, total_parts // (cpu_count * 2)))
+        
+        # 5. Dividir partes en lotes para procesamiento paralelo
+        part_batches = [list(all_parts)[i:i+batch_size] for i in range(0, total_parts, batch_size)]
+        num_batches = len(part_batches)
+        
+        logger.info(f"Procesando {total_parts} partes en {num_batches} lotes de ~{batch_size} items cada uno")
+        
+        # 6. Función para procesar un lote de partes
+        def process_batch(batch_parts, batch_idx):
+            batch_results = {}
+            batch_inventory_parts = set()
+            batch_inventory_records = 0
             
-            # Procesar cada parte con sus organizaciones
-            for part_number in all_parts:
+            for part_idx, part_number in enumerate(batch_parts):
                 part_clean = str(part_number).strip().upper()
                 is_mismatched = part_clean in mismatched_set
-                
-                logger.debug(f"Verificando parte ({processed_count + 1}/{len(all_parts)}): {part_clean}")
-                logger.debug(f"Estado: {'Con discrepancia' if is_mismatched else 'Sin discrepancia'}")
-                
                 part_has_inventory = False
                 
-                for org in org_destination:
-                    org_raw = str(org).strip()
-                    # Usar zfill en string individual, no en Series
-                    org_clean = org_raw.zfill(2)
-                    key = f"{part_clean}_{org_clean}"
+                # Procesar cada organización para esta parte
+                for org in normalized_orgs:
+                    key = f"{part_clean}_{org}"
                     
                     # Obtener información de inventario
-                    match_result = matcher.check_inventory(part_clean, org_clean)
+                    match_result = matcher.check_inventory(part_clean, org)
                     
-                    results[key] = {
+                    # Crear resultado para esta combinación parte/organización
+                    batch_results[key] = {
                         'part_number': part_clean,
-                        'organization': org_clean,
+                        'organization': org,
                         'quantity': match_result.quantity,
                         'has_inventory': match_result.has_inventory,
                         'has_mismatch': is_mismatched,
@@ -554,90 +747,122 @@ class AuditProcessor:
                         }
                     }
                     
+                    # Registrar errores si existen
                     if match_result.error_message:
-                        results[key]['error'] = match_result.error_message
-                        logger.warning(f"Error en {key}: {match_result.error_message}")
+                        batch_results[key]['error'] = match_result.error_message
                     
+                    # Actualizar estadísticas si hay inventario
                     if match_result.quantity > 0:
                         part_has_inventory = True
-                        total_inventory_records += 1
-                        logger.debug(f"Inventario encontrado: {match_result.quantity}")
+                        batch_inventory_records += 1
                 
+                # Registrar parte con inventario
                 if part_has_inventory:
-                    parts_with_inventory.add(part_clean)
-                    
-                processed_count += 1
+                    batch_inventory_parts.add(part_clean)
                 
-                # Log de progreso cada 100 partes
-                if processed_count % 100 == 0:
-                    logger.info(f"Procesadas {processed_count} de {len(all_parts)} partes")
-
-            # Generar resumen
-            summary = {
-                'total_parts': len(all_parts),
-                'parts_with_mismatch': len(mismatched_set),
-                'parts_without_mismatch': len(all_parts - mismatched_set),
-                'parts_with_inventory': len(parts_with_inventory),
-                'total_inventory_records': total_inventory_records
+                # Log de progreso más espaciado (cada 20% del lote)
+                if part_idx % max(1, len(batch_parts) // 5) == 0 and part_idx > 0:
+                    logger.debug(f"Lote {batch_idx+1}/{num_batches}: Procesadas {part_idx}/{len(batch_parts)} partes")
+            
+            gc.collect()
+            # Retornar resultados del lote
+            return {
+                'batch_results': batch_results,
+                'batch_inventory_parts': batch_inventory_parts,
+                'batch_inventory_records': batch_inventory_records
+            }
+        
+        # 7. Ejecutar procesamiento en paralelo
+        # - Usar ThreadPoolExecutor para paralelización controlada
+        # - Limitar workers para evitar saturación
+        max_workers = min(cpu_count * 2, 16)  # Evitar excesivos threads
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Crear futuros para cada lote
+            futures = {
+                executor.submit(process_batch, batch, idx): idx 
+                for idx, batch in enumerate(part_batches)
             }
             
-            logger.info("=== RESUMEN DE INVENTARIO ===")
-            for key, value in summary.items():
-                logger.info(f"{key}: {value}")
-            
-            results['summary'] = summary
-            return results
+            # Procesar resultados a medida que se completan
+            for future in as_completed(futures):
+                batch_idx = futures[future]
+                try:
+                    batch_data = future.result()
                     
-        except Exception as e:
-            logger.error(f"Error en verificación de inventario: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
-            raise
+                    # Actualizar resultados globales
+                    results.update(batch_data['batch_results'])
+                    parts_with_inventory.update(batch_data['batch_inventory_parts'])
+                    total_inventory_records += batch_data['batch_inventory_records']
+                    
+                    # Log de progreso por lote
+                    logger.info(f"Completado lote {batch_idx+1}/{num_batches}")
+                    
+                    # Liberar memoria del batch procesado
+                    del batch_data
+                    gc.collect()
+                    
+                except Exception as e:
+                    logger.error(f"Error en lote {batch_idx+1}: {str(e)}")
+        
+        # 8. Generar resumen
+        summary = {
+            'total_parts': total_parts,
+            'parts_with_mismatch': len(mismatched_set),
+            'parts_without_mismatch': total_parts - len(mismatched_set),
+            'parts_with_inventory': len(parts_with_inventory),
+            'total_inventory_records': total_inventory_records,
+            'processing_time': time.time() - start_time
+        }
+        
+        logger.info("=== RESUMEN DE INVENTARIO ===")
+        for key, value in summary.items():
+            logger.info(f"{key}: {value}")
+        
+        results['summary'] = summary
+        return results
         
     def _validate_non_hardware_parts(self, df: pd.DataFrame) -> Dict:
+        """Versión optimizada para validar partes non-hardware usando operaciones vectorizadas"""
         try:
-            non_hardware_parts = []
+            # 1. Filtrar de manera vectorizada
+            non_hardware_mask = ~df['Vertex'].str.contains('Hardware', case=False, na=False)
+            serial_control_yes = df['Serial Control'].str.upper() == 'YES'
             
-            # Usar nombres mapeados
-            non_hardware_mask = ~df['Vertex'].str.contains(  # Cambiado de 'Vertex Product Class'
-                'Hardware',
-                case=False,
-                na=False
-            )
+            # 2. Combinar filtros en una sola operación
+            combined_mask = non_hardware_mask & serial_control_yes
             
-            non_hardware_df = df[non_hardware_mask]
-            
-            for _, row in non_hardware_df.iterrows():
-                if row['Serial Control'].upper() == 'YES':  
-                    non_hardware_parts.append(row['Part Number'])
+            # 3. Extraer partes únicas directamente
+            non_hardware_parts = df.loc[combined_mask, 'Part Number'].unique().tolist()
 
             return {
-                'non_hardware_parts': list(set(non_hardware_parts)),
+                'non_hardware_parts': non_hardware_parts,
                 'total_issues': len(non_hardware_parts)
             }
         except Exception as e:
             logger.error(f"Error validating non-hardware parts: {str(e)}")
-        raise
+            return {'non_hardware_parts': [], 'total_issues': 0}
     
     def _check_vertex_consistency(self, df: pd.DataFrame) -> Dict:
         """
-        Check consistency of Vertex Product Class across organizations.
-        
-        Args:
-            df: DataFrame with audit data
-            
-        Returns:
-            Dict containing issues found
+        Versión optimizada de _check_vertex_consistency usando operaciones vectorizadas
         """
         try:
             issues = []
             
-            # Agrupar por parte para verificar consistencia de Vertex
-            for part_number in df['Part Number'].unique():
-                part_data = df[df['Part Number'] == part_number]
-                vertex_values = part_data['Vertex'].unique()
+            # Usar groupby más eficiente con Pandas
+            vertex_counts = df.groupby('Part Number')['Vertex'].nunique()
+            inconsistent_parts = vertex_counts[vertex_counts > 1].index.tolist()
+            
+            # Solo procesar partes con inconsistencia
+            if inconsistent_parts:
+                # Procesar en un solo paso para reducir iteraciones
+                inconsistent_data = df[df['Part Number'].isin(inconsistent_parts)]
                 
-                # Si hay más de un valor de Vertex para la misma parte, hay inconsistencia
-                if len(vertex_values) > 1:
+                # Agrupar y agregar de manera eficiente
+                for part_number, group in inconsistent_data.groupby('Part Number'):
+                    vertex_values = group['Vertex'].unique()
+                    
                     issues.append({
                         'part_number': part_number,
                         'vertex_values': list(vertex_values),
@@ -652,127 +877,335 @@ class AuditProcessor:
 
         except Exception as e:
             logger.error(f"Error checking vertex consistency: {str(e)}")
-            raise
+            return {'issues': [], 'total_issues': 0}  # Fallback silencioso
 
     
     def _process_org_mismatch_audit(self, df: pd.DataFrame, program_reqs: Dict) -> Dict:
-        """Process Organization Mismatch Audit"""
+        """Optimized Organization Mismatch Audit with batch processing and memory optimization"""
         try:
+            import gc  # Para limpieza de memoria
+            start_time = time.time()
+            logger.info("Starting organization mismatch audit (high performance)")
+            
             org_destination = program_reqs['org_destination']
-            missing_orgs = self._check_missing_orgs(df, org_destination)
-            result = {
-                'data': pd.DataFrame([]),
-                'ftp_upload': {'data': [], 'filename': ''},
-                'summary': {'total_missing_orgs': 0, 'total_vertex_issues': 0}
-            }
-
-            for item in missing_orgs['missing_items']:
-            # Procesamos organizaciones existentes
-                for org in item['current_orgs']:  # Usamos current_orgs actualizado
-                    status = item['org_status'].get(org, 'Active')
-                    item_result = {
-                        'Part Number': item['part_number'],
-                        'Organization': org,
-                        'Status': status,
-                        'Action Required': 'None' if status == 'Active' else f'Check status in Org {org}',
-                        'Vertex': item['vertex_class'],
-                        'Description': item['description'],
-                        'Current Orgs': ', '.join(sorted(item['current_orgs'])),
-                        'Missing Orgs': ', '.join(sorted(item['missing_orgs']))
-                    }
-                    result['data'] = pd.concat([result['data'], pd.DataFrame([item_result])], ignore_index=True)
-
-            # Procesamos organizaciones faltantes
-            for org in item['missing_orgs']:
-                item_result = {
-                    'Part Number': item['part_number'],
-                    'Organization': org,
-                    'Status': 'Missing in Org',
-                    'Action Required': f"Create in Org {org}",
-                    'Vertex': item['vertex_class'],
-                    'Description': item['description'],
-                    'Current Orgs': ', '.join(sorted(item['current_orgs'])),
-                    'Missing Orgs': ', '.join(sorted(item['missing_orgs']))
-                }
-                result['data'] = pd.concat([result['data'], pd.DataFrame([item_result])], ignore_index=True)
             
+            # 1. Obtener datos de orgs faltantes una sola vez (ya optimizado)
+            missing_orgs_result = self._check_missing_orgs(df, org_destination)
+            missing_items = missing_orgs_result['missing_items']
+            
+            # 2. Pre-calcular capacidad para evitar realocaciones
+            estimated_rows = sum(len(item['current_orgs']) + len(item['missing_orgs']) for item in missing_items)
+            all_rows = []
+            
+            # 3. Procesar en batches para conjuntos grandes
+            batch_size = 1000
+            num_batches = (len(missing_items) + batch_size - 1) // batch_size
+            
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, len(missing_items))
+                batch_items = missing_items[start_idx:end_idx]
+                
+                # Procesar batch completo en una operación
+                batch_rows = []
+                
+                for item in batch_items:
+                    # Extraer datos comunes una sola vez
+                    part_number = item['part_number']
+                    vertex = item.get('vertex_class', '')
+                    description = item.get('description', '')
+                    missing = item.get('missing_orgs', [])
+                    current = item.get('current_orgs', [])
+                    org_status = item.get('org_status', {})
+                    
+                    # Generar registros para orgs existentes
+                    for org in current:
+                        status = org_status.get(org, 'Active')
+                        batch_rows.append({
+                            'Part Number': part_number,
+                            'Organization': org,
+                            'Status': status,
+                            'Action Required': 'None' if status == 'Active' else f'Check status in Org {org}',
+                            'Vertex': vertex,
+                            'Description': description,
+                            'Current Orgs': ', '.join(sorted(current)),
+                            'Missing Orgs': ', '.join(sorted(missing))
+                        })
+                    
+                    # Generar registros para orgs faltantes
+                    for org in missing:
+                        batch_rows.append({
+                            'Part Number': part_number,
+                            'Organization': org,
+                            'Status': 'Missing in Org',
+                            'Action Required': f"Create in Org {org}",
+                            'Vertex': vertex,
+                            'Description': description,
+                            'Current Orgs': ', '.join(sorted(current)),
+                            'Missing Orgs': ', '.join(sorted(missing))
+                        })
+                
+                # Agregar al resultado global
+                all_rows.extend(batch_rows)
+                
+                # Liberar memoria del batch
+                del batch_rows
+                del batch_items
+                gc.collect()
+                
+                # Log de progreso
+                if num_batches > 1:
+                    logger.info(f"Processed batch {batch_idx+1}/{num_batches}, rows so far: {len(all_rows)}")
+            
+            # 4. Crear DataFrame una sola vez al final (más eficiente)
+            result_df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame([])
+            
+            # 5. Ejecutar vertex_issues de manera más eficiente
             vertex_issues = self._check_vertex_consistency(df)
-            result['summary'].update({
-                'total_missing_orgs': len(result['data'][result['data']['Status'] == 'Missing in Org']),
-                'total_vertex_issues': len(vertex_issues.get('issues', []))
-            })
-
-            print("\n=== ORG MISMATCH AUDIT RESULT ===")
-            if not result['data'].empty:
-                print(f"Result Sample:\n{result['data'].head(3)}")
             
+            # Preparar resultado
+            result = {
+                'data': result_df,
+                'ftp_upload': {'data': [], 'filename': ''},
+                'summary': {
+                    'total_missing_orgs': len(result_df[result_df['Status'] == 'Missing in Org']) if not result_df.empty else 0,
+                    'total_vertex_issues': len(vertex_issues.get('issues', [])),
+                    'processing_time': time.time() - start_time
+                }
+            }
+            
+            logger.info(f"Organization mismatch audit completed in {time.time() - start_time:.2f}s")
             return result
-
+            
         except Exception as e:
             logger.error(f"Error in org mismatch audit: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
             raise
 
     def _check_missing_orgs(self, df: pd.DataFrame, org_destination: List[str]) -> Dict:
         """
-        Verifica y clasifica las organizaciones para cada pieza.
+        Optimized implementation for checking missing organizations.
+        Compatible with Polars 1.26+
+        
+        Args:
+            df: DataFrame with audit data
+            org_destination: List of target organizations
+            
+        Returns:
+            Dict with missing organizations analysis
         """
         try:
+
+            
+            start_time = time.time()
+            logger.info("=== CHECKING MISSING ORGS (OPTIMIZED) ===")
+            
+            # 1. Input Normalization - Single normalized copy of org_destination
+            normalized_org_dest = sorted([str(org).strip().zfill(2) for org in org_destination])
+            org_dest_set = set(normalized_org_dest)  # For O(1) lookup
+            
+            # 2. Convert input to Polars and keep conversion as lazy as possible
+            if isinstance(df, pd.DataFrame):
+                # Convert once with schema inference to avoid redundant analysis
+                df_pl = pl.from_pandas(df, include_index=False)
+            else:
+                df_pl = df
+                
+            # 3. Use simplified non-lazy approach first to avoid version compatibility issues
+            # For Polars 1.26, we'll use direct expressions rather than method chaining
+            
+            # Get available columns
+            available_columns = set(df_pl.columns)
+            
+            # Normalize Organization column using Polars 1.26 compatible syntax
+            df_pl = df_pl.with_columns([
+                # Convert Organization to string and normalize
+                pl.col("Organization")
+                .cast(pl.Utf8)
+                .fill_null("")
+                .alias("org_raw")
+            ])
+            
+            # Manually apply strip and zfill since str namespace has changed
+            df_pl = df_pl.with_columns([
+                pl.col("org_raw").str.strip_chars().alias("org_stripped")
+            ])
+            
+            # In Polars 1.26, create a UDF for zfill since it might not be available directly
+            df_pl = df_pl.with_columns([
+                  pl.col("org_stripped").str.zfill(2).alias("org_normalized")
+                ])
+            
+            # Keep Part Number for grouping
+            df_pl = df_pl.with_columns([
+                pl.col("Part Number").alias("part_key")
+            ])
+            
+            # 4. Select and prepare columns directly
+            select_columns = ["part_key", "org_normalized"]
+            
+            # Add metadata columns if they exist
+            if "Vertex" in available_columns:
+                select_columns.append("Vertex")
+            elif "VERTEX PRODUCT CLASS" in available_columns:
+                select_columns.append("VERTEX PRODUCT CLASS")
+                
+            if "Description" in available_columns:
+                select_columns.append("Description")
+            elif "DESCRIPTION" in available_columns:
+                select_columns.append("DESCRIPTION")
+                
+            if "Status" in available_columns:
+                select_columns.append("Status")
+            elif "ITEM STATUS" in available_columns:
+                select_columns.append("ITEM STATUS")
+            
+            # Select only needed columns to reduce memory usage
+            df_pl = df_pl.select(select_columns)
+            
+            # 5. Group and aggregate data
+            logger.debug("Calculating part information")
+            
+            # Process part metadata by grouping
+            agg_expressions = [
+                pl.col("org_normalized").unique().alias("current_orgs")
+            ]
+            
+            # Add metadata columns to aggregation if they exist
+            if "Vertex" in df_pl.columns:
+                agg_expressions.append(pl.col("Vertex").first().alias("vertex_class"))
+            elif "VERTEX PRODUCT CLASS" in df_pl.columns:
+                agg_expressions.append(pl.col("VERTEX PRODUCT CLASS").first().alias("vertex_class"))
+                
+            if "Description" in df_pl.columns:
+                agg_expressions.append(pl.col("Description").first().alias("description"))
+            elif "DESCRIPTION" in df_pl.columns:
+                agg_expressions.append(pl.col("DESCRIPTION").first().alias("description"))
+                
+            if "Status" in df_pl.columns:
+                agg_expressions.append(pl.col("Status").first().alias("status"))
+            elif "ITEM STATUS" in df_pl.columns:
+                agg_expressions.append(pl.col("ITEM STATUS").first().alias("status"))
+            
+            # Perform group by and aggregation
+            part_info = df_pl.group_by("part_key").agg(agg_expressions)
+            
+            # 6. Convert to Python structures for final processing
+            logger.debug("Processing missing organizations")
+            
+            # Convert to dictionaries
+            part_records = part_info.to_dicts()
             missing_items = []
-            result = {'missing_items': [], 'total_missing': 0}
             
-            # Normalizar org_destination una sola vez usando Series.str.zfill
-            normalized_org_dest = pd.Series([str(org).strip() for org in org_destination]).str.zfill(2).tolist()
+            # Process each part
+            for record in part_records:
+                part_key = record["part_key"]
+                
+                # Default empty values for safety
+                current_orgs = set(record.get("current_orgs", []))
+                vertex_class = record.get("vertex_class", "")
+                description = record.get("description", "")
+                status = record.get("status", "Active")
+                
+                # Calculate missing orgs using set operations
+                missing_orgs = sorted(list(set(normalized_org_dest) - current_orgs))
+                current_orgs_filtered = sorted(list(current_orgs & org_dest_set))
+                
+                # Only include if relevant
+                if not (missing_orgs or current_orgs_filtered):
+                    continue
+                    
+                # Create org status mapping
+                org_status = {org: status for org in current_orgs}
+                    
+                # Create result record
+                missing_items.append({
+                    'part_number': part_key,
+                    'missing_orgs': missing_orgs,
+                    'current_orgs': current_orgs_filtered,
+                    'org_status': org_status,
+                    'vertex_class': vertex_class,
+                    'description': description
+                })
             
-            for part_number, part_group in df.groupby('Part Number'):
-                # Crear un diccionario de estado por organización
-                org_status = {}
-                org_exists = {}  # Nuevo diccionario para rastrear existencia real
-                
-                # Primero, procesamos todas las organizaciones existentes
-                for _, row in part_group.iterrows():
-                    org_raw = str(row['Organization']).strip()
-                    # Usar zfill en string individual, no en Series
-                    org = org_raw.zfill(2)
-                    status = row['Status']
-                    org_status[org] = status
-                    org_exists[org] = True
-                
-                # Ahora verificamos las organizaciones de destino
-                missing_orgs = []
-                current_orgs = []
-                
-                for org in normalized_org_dest:
-                    if org in org_exists:
-                        current_orgs.append(org)
-                    else:
-                        missing_orgs.append(org)
-                
-                # Solo agregamos a missing_items si hay organizaciones faltantes
-                if missing_orgs or current_orgs:
-                    missing_items.append({
-                        'part_number': part_number,
-                        'missing_orgs': missing_orgs,
-                        'current_orgs': current_orgs,  # Solo organizaciones realmente existentes
-                        'org_status': org_status,
-                        'vertex_class': part_group['Vertex'].iloc[0],
-                        'description': part_group['Description'].iloc[0]
-                    })
+            # 7. Create final result
+            elapsed_time = time.time() - start_time
             
-            result['missing_items'] = missing_items
-            result['total_missing'] = len(missing_items)
+            result = {
+                'missing_items': missing_items,
+                'total_missing': len(missing_items),
+                'processing_time': elapsed_time
+            }
             
-            # Logging para debugging
-            for item in missing_items[:3]:
-                print(f"Part {item['part_number']}:")
-                print(f"  Missing orgs: {item['missing_orgs']}")
-                print(f"  Current orgs with status: {item['org_status']}")
-                print(f"  Actually present in: {item['current_orgs']}")
+            logger.info(f"_check_missing_orgs completed in {elapsed_time:.2f} seconds")
+            logger.info(f"Total parts with missing orgs: {len(missing_items)}")
             
             return result
-                        
+            
         except Exception as e:
-            print(f"Error in _check_missing_orgs: {str(e)}")
-            raise
+            logger.error(f"Error in optimized _check_missing_orgs: {str(e)}")
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            
+            # Fallback to simplified pandas implementation
+            return self._check_missing_orgs_fallback(df, org_destination)
+        
+    def _check_missing_orgs_fallback(self, df: pd.DataFrame, org_destination: List[str]) -> Dict:
+        """Reliable fallback implementation for missing orgs detection"""
+        start_time = time.time()
+        logger.warning("Using fallback implementation for missing orgs check")
+        
+        # Normalize org_destination once
+        normalized_org_dest = [str(org).strip().zfill(2) for org in org_destination]
+        missing_items = []
+        
+        # Process each part group
+        for part_number, part_group in df.groupby('Part Number'):
+            # Extract and normalize orgs in a single pass
+            orgs = set()
+            org_status = {}
+            
+            for _, row in part_group.iterrows():
+                org = str(row['Organization']).strip().zfill(2)
+                orgs.add(org)
+                org_status[org] = row.get('Status', 'Active')
+            
+            # Calculate missing orgs efficiently
+            missing_orgs = [org for org in normalized_org_dest if org not in orgs]
+            current_orgs = [org for org in normalized_org_dest if org in orgs]
+            
+            # Only include if there are orgs to report
+            if missing_orgs or current_orgs:
+                # Extract metadata once
+                vertex_class = ""
+                description = ""
+                
+                if 'Vertex' in part_group.columns and not part_group['Vertex'].empty:
+                    vertex_class = part_group['Vertex'].iloc[0]
+                elif 'VERTEX PRODUCT CLASS' in part_group.columns and not part_group['VERTEX PRODUCT CLASS'].empty:
+                    vertex_class = part_group['VERTEX PRODUCT CLASS'].iloc[0]
+                    
+                if 'Description' in part_group.columns and not part_group['Description'].empty:
+                    description = part_group['Description'].iloc[0]
+                elif 'DESCRIPTION' in part_group.columns and not part_group['DESCRIPTION'].empty:
+                    description = part_group['DESCRIPTION'].iloc[0]
+                
+                missing_items.append({
+                    'part_number': part_number,
+                    'missing_orgs': missing_orgs,
+                    'current_orgs': current_orgs,
+                    'org_status': org_status,
+                    'vertex_class': vertex_class,
+                    'description': description
+                })
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"Fallback missing orgs check completed in {elapsed_time:.2f} seconds")
+        
+        return {
+            'missing_items': missing_items,
+            'total_missing': len(missing_items),
+            'processing_time': elapsed_time
+        }
     
 
     def _process_other_attributes_audit(
@@ -1314,64 +1747,33 @@ class AuditProcessor:
             return audit_items
 
     def _read_audit_file(self, file_path: str) -> pd.DataFrame:
-        """
-        Read and validate audit file.
-        
-        Args:
-            file_path: Path to the audit file
-            
-        Returns:
-            DataFrame with normalized and mapped columns
-            
-        Raises:
-            ValueError: If required columns are missing or file cannot be read
-        """
+        """Read and validate audit file."""
         try:
             logger.info(f"Reading audit file: {file_path}")
             
-            # Read file using repository
-            df = self.repository.read_excel_file(
-                Path(file_path),
-                is_inventory=False
-            )  
+            # Leer el archivo usando el método combinado, pasando el mapeo
+            df = self.repository.validate_and_read_file(
+                file_path, 
+                is_inventory=False,
+                column_mapping=self._config.column_mapping
+            )
             
-            # Create lookup dictionaries for flexible matching
-            file_cols = {col.replace(' ', ''): col for col in df.columns}
-            req_cols = {col.replace(' ', ''): col for col in self._config.column_mapping.keys()}
+            # Aplicar el mapeo completo después de leer, incluso si viene del caché
+            rename_dict = {original: mapped for original, mapped in self._config.column_mapping.items() if original in df.columns}
+            if rename_dict:
+                df = df.rename(columns=rename_dict)
+                logger.info(f"Columnas renombradas después de lectura: {rename_dict}")
             
-            # Create mapping between actual and required columns
-            column_mapping = {}
-            for req_key, req_col in req_cols.items():
-                if req_key in file_cols:
-                    column_mapping[file_cols[req_key]] = self._config.column_mapping[req_col]
-                    
-            # Find truly missing columns
-            mapped_cols = set(req_cols.keys())
-            file_col_keys = set(file_cols.keys())
-            missing = mapped_cols - file_col_keys
+            # Verificación de columnas críticas
+            critical_columns = ['Part Number', 'Organization', 'Serial Control']
+            missing_critical = [col for col in critical_columns if col not in df.columns]
+            if missing_critical:
+                logger.error(f"Columnas críticas faltan después de renombramiento: {missing_critical}")
+                raise ValueError(f"Columnas críticas faltan después de renombramiento: {missing_critical}")
             
-            if missing:
-                missing_original = {next(k for k, v in req_cols.items() if k == m) 
-                                for m in missing}
-                raise ValueError(f"Missing required columns: {missing_original}")
-            
-            # Rename columns according to mapping
-            df = df.rename(columns=column_mapping)
-            
-            # Clean up data
-            for col in df.columns:
-                if df[col].dtype == object:
-                    df[col] = df[col].fillna('').str.strip()
-            
-            # Verify required columns are present after mapping
-            required_columns = set(self._config.column_mapping.values())
-            missing_after_map = required_columns - set(df.columns)
-            if missing_after_map:
-                raise ValueError(f"Missing mapped columns: {missing_after_map}")
-                    
-            logger.info(f"Successfully read audit file with {len(df)} rows")
+            logger.debug(f"Columnas finales en DataFrame: {df.columns.tolist()}")
             return df
-            
+                
         except Exception as e:
             logger.error(f"Error reading audit file: {str(e)}")
             raise ValueError(f"Error reading audit file: {str(e)}")

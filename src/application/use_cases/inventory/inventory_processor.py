@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
+import os
 from typing import Dict, Optional, List
 from datetime import datetime
 import pandas as pd
@@ -63,7 +66,7 @@ class InventoryProcessor:
 
     def process_inventory_data(self, df: pd.DataFrame) -> List[InventoryMatch]:
         """
-        Procesa datos de inventario con validación mejorada
+        Procesa datos de inventario con validación mejorada utilizando operaciones vectorizadas
         
         Args:
             df: DataFrame con datos de inventario
@@ -72,48 +75,133 @@ class InventoryProcessor:
             Lista de InventoryMatch con información procesada y validada
         """
         try:
+            
+            # Crear una copia para evitar modificar el DataFrame original
+            df = df.copy()
+            
+            # Preprocesar columnas críticas vectorialmente - mucho más rápido que hacerlo fila por fila
+            if 'Part Number' in df.columns:
+                df['part_number_norm'] = df['Part Number'].astype(str).str.strip().str.upper()
+            else:
+                df['part_number_norm'] = 'UNKNOWN'
+                
+            if 'Organization' in df.columns:
+                df['org_norm'] = df['Organization'].astype(str).str.strip().str.zfill(2)
+            else:
+                df['org_norm'] = '00'
+            
+            # Función para procesar un lote de filas
+            def process_batch(batch_df):
+                batch_results = []
+                
+                # Crear diccionarios una vez por lote para menor overhead
+                batch_dicts = batch_df.to_dict('records')
+                
+                for record in batch_dicts:
+                    try:
+                        # Usar valores normalizados previamente
+                        part_number = record.get('part_number_norm', 'UNKNOWN')
+                        org = record.get('org_norm', '00')
+                        
+                        # Verificar caché primero si está disponible
+                        cache_key = f"{part_number}_{org}"
+                        if cache_key in self._inventory_cache:
+                            batch_results.append(self._inventory_cache[cache_key])
+                            continue
+                        
+                        # Crear aging info (solo una vez por registro)
+                        aging_info = InventoryAgingInfo()
+                        aging_data = {
+                            'Aging 0-30 Quantity': record.get('Aging_0_30'),
+                            'Aging 31-60 Quantity': record.get('Aging_31_60'),
+                            'Aging 61-90 Quantity': record.get('Aging_61_90')
+                        }
+                        aging_info.update_from_aging_values(aging_data)
+                        
+                        # Crear match con validación
+                        match = InventoryMatch(
+                            part_number=part_number,
+                            organization=org,
+                            has_inventory=False,  # Se actualizará en update_from_raw_data
+                            match_criteria=self.match_criteria,
+                            aging_info=aging_info
+                        )
+                        
+                        # Actualizar con datos completos
+                        match.update_from_raw_data(record)
+                        
+                        # Guardar en caché para reutilización
+                        self._inventory_cache[cache_key] = match
+                        
+                        batch_results.append(match)
+                        
+                    except Exception as e:
+                        self.logger.error(f"Error processing record: {str(e)}")
+                        batch_results.append(self.create_empty_record(
+                            part=str(record.get('Part Number', 'UNKNOWN')),
+                            org=str(record.get('Organization', '00')),
+                            error=str(e)
+                        ))
+                
+                return batch_results
+            
+            # Determinar tamaño de lote y número de workers óptimos
+            total_rows = len(df)
+            cpu_count = os.cpu_count() or 4
+            workers = min(cpu_count, 8)  # Limitar a 8 threads máximo
+            batch_size = max(100, total_rows // (workers * 4))  # Ajustado para equilibrar carga y overhead
+            
+            # Logging inicial
+            self.logger.info(f"Procesando {total_rows} registros de inventario con {workers} workers")
+            self.logger.info(f"Tamaño de lote: {batch_size} registros")
+            
             results = []
             
-            for _, row in df.iterrows():
-                try:
-                    # Extraer y validar datos básicos
-                    part_number = str(row.get('Part Number', '')).strip().upper()
-                    org = str(row.get('Organization', '')).strip().zfill(2)
+            if total_rows < 1000:
+                # Para conjuntos pequeños, procesamiento secuencial es más eficiente
+                results = process_batch(df)
+            else:
+                # Para conjuntos grandes, procesamiento paralelo por lotes
+                batches = [df.iloc[i:i+batch_size] for i in range(0, total_rows, batch_size)]
+                batch_count = len(batches)
+                
+                self.logger.info(f"Procesando en {batch_count} lotes")
+                
+                # Procesamiento paralelo de lotes
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    # Enviar lotes para procesamiento
+                    futures = {executor.submit(process_batch, batch): i for i, batch in enumerate(batches)}
                     
-                    # Crear aging info
-                    aging_info = InventoryAgingInfo()
-                    aging_data = {
-                        'Aging 0-30 Quantity': row.get('Aging_0_30'),
-                        'Aging 31-60 Quantity': row.get('Aging_31_60'),
-                        'Aging 61-90 Quantity': row.get('Aging_61_90')
-                    }
-                    aging_info.update_from_aging_values(aging_data)
-                    
-                    # Crear match con validación
-                    match = InventoryMatch(
-                        part_number=part_number,
-                        organization=org,
-                        has_inventory=False,  # Se actualizará en update_from_raw_data
-                        match_criteria=self.match_criteria,
-                        aging_info=aging_info
-                    )
-                    
-                    # Actualizar con datos completos
-                    match.update_from_raw_data(row.to_dict())
-                    results.append(match)
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing row: {str(e)}")
-                    results.append(self.create_empty_record(
-                        part=str(row.get('Part Number', 'UNKNOWN')),
-                        org=str(row.get('Organization', '00')),
-                        error=str(e)
-                    ))
-                    
+                    # Recolectar resultados a medida que se completan
+                    for i, future in enumerate(as_completed(futures)):
+                        batch_idx = futures[future]
+                        try:
+                            batch_results = future.result()
+                            results.extend(batch_results)
+                            
+                            # Logging de progreso cada 5 lotes o en el último lote
+                            if (batch_idx % 5 == 0 or batch_idx == batch_count - 1):
+                                self.logger.info(f"Completados {batch_idx + 1}/{batch_count} lotes ({len(results)} registros)")
+                                
+                            # Liberar memoria periódicamente
+                            if i % 10 == 0:
+                                gc.collect()
+                                
+                        except Exception as e:
+                            self.logger.error(f"Error en lote {batch_idx}: {str(e)}")
+                            # Continuar con los demás lotes a pesar del error
+            
+            # Limitar tamaño del caché para evitar problemas de memoria
+            if len(self._inventory_cache) > 10000:
+                # Conservar solo las entradas más recientes
+                cache_items = list(self._inventory_cache.items())
+                self._inventory_cache = dict(cache_items[-10000:])
+            
+            self.logger.info(f"Procesamiento completado: {len(results)} registros generados")
             return results
             
         except Exception as e:
-            self.logger.error(f"Error in process_inventory_data: {str(e)}")
+            self.logger.error(f"Error en process_inventory_data: {str(e)}")
             return []
 
     @staticmethod

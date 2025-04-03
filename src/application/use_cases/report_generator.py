@@ -1910,7 +1910,8 @@ class ReportGenerator:
             logger.warning(f"Ejemplos de partes extras: {extra_examples}")
             if len(extra) > max_examples:
                 logger.warning(f"... y {len(extra) - max_examples} más")
-    
+                
+                
     def _sanitize_filename(self, name: str) -> str:
         """Sanitiza un nombre para que sea válido como nombre de archivo y lo convierte a mayúsculas."""
         # Reemplazar caracteres inválidos para nombres de archivo

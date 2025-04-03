@@ -1,11 +1,14 @@
 import re
+import time
 import traceback
+import duckdb
 import pandas as pd
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Set, Union
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from application.use_cases.inventory.inventory_columns import InventoryColumns
+from infrastructure.persistence.cache.limited_cache import LimitedCache
 from utils.constant import EXCEL_EXTENSIONS
 import os
 import json
@@ -13,6 +16,7 @@ from functools import lru_cache
 import openpyxl
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Protection, Font
 import warnings
+import polars as pl
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
@@ -29,7 +33,11 @@ class ExcelRepository:
         """Initialize repository with paths."""
         self.base_path = Path(base_path) if base_path else Path.cwd()
         self.config_path = Path(config_path) if config_path else self.base_path
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+        self._dataframe_cache = LimitedCache(max_items=20)  # Caché más inteligente
+        
+        # Inicializar cache para DataFrames
+        self._validation_results = {}
         
         self.inventory_required_columns = InventoryColumns.get_required_columns()
 
@@ -97,15 +105,45 @@ class ExcelRepository:
         if not os.environ.get('SKIP_VALIDATION'):
             self._validate_environment()
 
-    def _normalize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Normalize DataFrame column names."""
-        df.columns = df.columns.str.strip() \
-                            .str.replace('\n', '') \
-                            .str.replace('\r', '') \
-                            .str.replace('\t', '') \
-                            .str.replace('  ', ' ') \
-                            .str.upper()
-        return df
+
+    def _normalize_column_name(self, col_name: str) -> str:
+        return (col_name
+                .strip()
+                .replace('\n', '')
+                .replace('\r', '')
+                .replace('\t', '')
+                .replace('  ', ' ')
+                .upper())
+
+    def _normalize_columns(self, df: Union[pd.DataFrame, pl.DataFrame, pl.LazyFrame]) -> Union[pd.DataFrame, pl.DataFrame, pl.LazyFrame]:
+        """
+        Normaliza todas las columnas de un DataFrame.
+        
+        Args:
+            df: DataFrame (pandas o polars) a normalizar
+            
+        Returns:
+            DataFrame con columnas normalizadas
+        """
+        import polars as pl
+        
+        if isinstance(df, pl.DataFrame):
+            return df.rename({
+                col: self._normalize_column_name(col) 
+                for col in df.columns
+            })
+        elif isinstance(df, pd.DataFrame):
+            df.columns = [self._normalize_column_name(col) for col in df.columns]
+            return df
+        elif isinstance(df, pl.LazyFrame):
+            return df.rename({
+                col: self._normalize_column_name(col) 
+                for col in df.columns
+            })
+        else:
+            logger.warning(f"Tipo de DataFrame no reconocido: {type(df)}")
+            return df
+        
     
     def _validate_environment(self) -> None:
         """Validate the environment setup."""
@@ -143,53 +181,261 @@ class ExcelRepository:
             logger.error(f"Error checking if file is inventory: {str(e)}")
             return False
         
+        
+    def _read_with_polars(
+        self, 
+        file_path: Path, 
+        is_inventory: bool = False, 
+        sheet_name: Optional[str] = None,
+        read_mode: str = 'auto'  # 'auto', 'lazy', 'simple'
+    ) -> Optional[pd.DataFrame]:
+        """
+        Método unificado para lectura de archivos Excel con Polars.
+        
+        Args:
+            file_path: Ruta del archivo Excel
+            is_inventory: Indica si es un archivo de inventario
+            sheet_name: Nombre de la hoja a leer
+            read_mode: Modo de lectura ('auto', 'lazy', 'simple')
+        
+        Returns:
+            DataFrame procesado
+        """
+        start_time = time.time()
+        logger.info(f"Iniciando lectura con Polars: {file_path}")
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+            
+        try:
+            # Selección de hoja
+            if sheet_name is None:
+                xl = pd.ExcelFile(file_path)
+                sheets = xl.sheet_names
+                sheet_name = sheets[0] if sheets else None
+                logger.info(f"Usando primera hoja: {sheet_name}")
+
+            # Opciones de lectura comunes
+            read_options = {
+                "skip_rows": 1,  # Saltar primera fila de título
+                "header_row": 1,  # Usar segunda fila como encabezado
+            }
+
+            # Determinar modo de lectura
+            if read_mode == 'auto':
+                file_size_mb = file_path.stat().st_size / (1024 * 1024)
+                read_mode = 'lazy' if file_size_mb > 10 or is_inventory else 'simple'
+
+            # Leer con el modo seleccionado
+            if read_mode == 'lazy':
+                # Procesamiento lazy para archivos grandes
+                df_dict = pl.read_excel(file_path, sheet_name=sheet_name, read_options=read_options)
+                
+                # Seleccionar hoja
+                if isinstance(df_dict, dict):
+                    sheet_name = list(df_dict.keys())[0]
+                    df_pl = df_dict[sheet_name].lazy()
+                else:
+                    df_pl = df_dict.lazy()
+
+                # Normalizar columnas
+                df_pl = df_pl.rename({
+                    col: self._normalize_column_name(col) 
+                    for col in df_pl.collect_schema().keys()
+                })
+
+                # Materializar
+                df_pd = df_pl.collect(streaming=True).to_pandas()
+
+            else:
+                # Lectura simple para archivos pequeños
+                df_pl = pl.read_excel(
+                    file_path, 
+                    sheet_name=sheet_name, 
+                    read_options=read_options
+                )
+                
+                # Convertir a pandas
+                df_pd = df_pl.to_pandas()
+
+            # Normalizar columnas
+            df_pd.columns = [
+                self._normalize_column_name(str(col)) 
+                for col in df_pd.columns
+            ]
+
+            # Eliminar columnas sin nombre
+            df_pd = df_pd.loc[:, ~df_pd.columns.str.contains('^UNNAMED:', case=False, na=False)]
+
+            elapsed = time.time() - start_time
+            logger.info(f"Archivo leído con Polars en {elapsed:.2f} segundos. Modo: {read_mode}")
+            
+            return df_pd
+
+        except Exception as e:
+            logger.error(f"Error leyendo archivo con Polars: {str(e)}")
+            logger.error(traceback.format_exc())
+            return None
+
     def read_excel_file(
         self, 
         file_path: Path,
         is_inventory: bool = False,
-        sheet_name: Optional[str] = None
+        sheet_name: Optional[str] = None,
+        **kwargs
     ) -> pd.DataFrame:
+        # Intentar leer con Polars primero
+        df = self._read_with_polars(file_path, is_inventory, sheet_name)
+        
+        # Fallback a Pandas si Polars falla
+        if df is None:
+            logger.warning("Fallback a lectura con Pandas")
+            df = pd.read_excel(
+                file_path, 
+                skiprows=1, 
+                sheet_name=sheet_name, 
+                engine='openpyxl',
+                dtype=str
+            )
+            
+            # Normalizar columnas
+            df.columns = [self._normalize_column_name(str(col)) for col in df.columns]
+            df = df.loc[:, ~df.columns.str.contains('^UNNAMED:', case=False, na=False)]
+        
+        return df
+            
+    def validate_and_read_file(self, file_path: Union[str, Path], **kwargs) -> pd.DataFrame:
+        # Convertir a Path si es string
+        file_path = Path(file_path) if isinstance(file_path, str) else file_path
+        
+        # Generar clave de caché más robusta
+        cache_key = (
+            str(file_path), 
+            kwargs.get('is_inventory', False), 
+            kwargs.get('sheet_name')
+        )
+        
+        # Intentar obtener del caché
+        cached_df = self._dataframe_cache.get(cache_key)
+        if cached_df is not None:
+            logger.info(f"Datos recuperados del caché para: {file_path}")
+            return cached_df.copy()
+        
+        # Leer y validar archivo
+        df = self.read_excel_file(file_path, **kwargs)
+        
+        # Validar según tipo de archivo
+        if kwargs.get('is_inventory', False):
+            self._validate_inventory_columns(df)
+        else:
+            self._validate_audit_columns(df)
+        
+        # Guardar en caché
+        self._dataframe_cache.set(cache_key, df.copy())
+        
+        return df
+    
+    def _validate_dataframe(
+        self, 
+        df,  # Acepta tanto DataFrame de Pandas como Polars
+        is_inventory: bool = False,
+        critical_columns: Optional[Set[str]] = None,
+        type_checks: Optional[Dict[str, type]] = None
+    ) -> Any:  # Devuelve el mismo tipo de DataFrame que recibe
         """
-        Read Excel file with consistent handling.
+        Validación unificada y flexible de DataFrames compatible con Pandas y Polars.
+        
+        Args:
+            df: DataFrame a validar (Pandas o Polars)
+            is_inventory: Indica si es un DataFrame de inventario
+            critical_columns: Columnas críticas personalizadas
+            type_checks: Validaciones de tipos de datos personalizadas
+        
+        Raises:
+            ValueError: Si la validación falla
         """
-        try:
-            logger.debug(f"Reading {'inventory' if is_inventory else 'audit'} file: {file_path}")
-
-            # Configure read options - siempre saltamos la primera fila que es el título
-            options = {
-                'engine': 'openpyxl',
-                'skiprows': 1  # Siempre saltamos la primera fila (título)
-            }
-
-            # First check if file has multiple sheets
-            xl = pd.ExcelFile(file_path)
-            sheets = xl.sheet_names
-
-            # If sheet_name not provided, use first sheet
-            if not sheet_name and len(sheets) > 0:
-                sheet_name = sheets[0]
-
-            options['sheet_name'] = sheet_name
-
-            # Read the file
-            df = pd.read_excel(file_path, **options)
-
-            # If multiple sheets were returned, use the first one
-            if isinstance(df, dict):
-                sheet_name = list(df.keys())[0]
-                df = df[sheet_name]
-
-            # Normalize columns
-            df = self._normalize_columns(df)
-
-            # Eliminar columnas sin nombre
-            df = df.loc[:, ~df.columns.str.contains('^Unnamed:', na=False)]
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Error reading Excel file {file_path}: {str(e)}")
-            raise
+        import polars as pl
+        
+        # 1. Detección del tipo de DataFrame
+        is_polars = isinstance(df, (pl.DataFrame, pl.LazyFrame))
+        is_pandas = isinstance(df, pd.DataFrame)
+        
+        if not (is_polars or is_pandas):
+            raise ValueError("DataFrame debe ser Pandas o Polars")
+        
+        # 2. Validación de DataFrame vacío
+        if (is_polars and df.is_empty()) or (is_pandas and df.empty):
+            raise ValueError("DataFrame está vacío")
+        
+        # 3. Definir columnas críticas
+        if critical_columns is None:
+            critical_columns = (
+                set(self.inventory_required_columns.keys()) 
+                if is_inventory 
+                else {'Full Part Number', 'Organization Code', 'Serial Number Control'}
+            )
+        
+        # 4. Función flexible para obtener columnas
+        def get_columns(dataframe):
+            if is_polars:
+                return dataframe.columns
+            return list(dataframe.columns)
+        
+        # 5. Función flexible para verificar existencia de columna
+        def column_exists(dataframe, column):
+            columns = get_columns(dataframe)
+            return any(
+                col.lower().replace(' ', '') == column.lower().replace(' ', '') 
+                for col in columns
+            )
+        
+        # 6. Verificar columnas críticas
+        missing_columns = [
+            col for col in critical_columns 
+            if not column_exists(df, col)
+        ]
+        
+        if missing_columns:
+            raise ValueError(
+                f"{'Inventory' if is_inventory else 'Audit'} file missing critical columns: {missing_columns}"
+            )
+        
+        # 7. Conversión y validación de tipos de datos
+        def convert_column_type(dataframe, column, expected_type):
+            if is_polars:
+                # Estrategia para Polars
+                return dataframe.with_columns(
+                    pl.col(column).cast(pl.Float64 if expected_type == float else pl.Utf8, strict=False)
+                )
+            else:
+                # Estrategia para Pandas
+                dataframe[column] = pd.to_numeric(dataframe[column], errors='coerce')
+                dataframe[column].fillna(0.0 if expected_type == float else '', inplace=True)
+                return dataframe
+        
+        # 8. Tipos de datos predeterminados
+        type_checks = type_checks or {}
+        default_type_checks = (
+            {col: float for col in get_columns(df) if any(keyword in col.upper() for keyword in ['QUANTITY', 'VALUE', 'AGING'])}
+            if is_inventory 
+            else {}
+        )
+        type_checks = {**default_type_checks, **type_checks}
+        
+        # 9. Aplicar conversión de tipos
+        for col, expected_type in type_checks.items():
+            matching_column = next(
+                (c for c in get_columns(df) if c.lower().replace(' ', '') == col.lower().replace(' ', '')), 
+                None
+            )
+            if matching_column:
+                df = convert_column_type(df, matching_column, expected_type)
+        
+        # 10. Logging de información
+        logger.info(f"Validación completada para {'inventario' if is_inventory else 'auditoría'}")
+        logger.info(f"Total de registros: {len(df)}")
+        logger.info(f"Columnas validadas: {get_columns(df)}")
+        
+        return df
 
     def _validate_file_basics(self, file_path: Union[str, Path]) -> Path:
         """Validate basic file requirements."""
@@ -203,53 +449,54 @@ class ExcelRepository:
         return path
     
     def validate_input_file(self, file_path: Union[str, Path]) -> bool:
-        """
-        Validate audit file format and content.
-        
-        Args:
-            file_path: Path to the audit file to validate
-        """
-        try:
-            path = self._validate_file_basics(file_path)
-            
-            # Read and normalize
-            df = self.read_excel_file(path)
-            
-            # Verify required columns
-            missing_columns = set(self.audit_required_columns.keys()) - set(df.columns)
-            
-            if missing_columns:
-                raise ValueError(f"Audit file missing required columns: {missing_columns}")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"File validation error: {str(e)}")
-            raise
+        """Validate audit file format and content."""
+        df = self.read_excel_file(file_path, is_inventory=False)
+        self._validate_dataframe(df, is_inventory=False)
+        return True
 
     def validate_inventory_file(self, file_path: Union[str, Path]) -> bool:
-        """
-        Validate inventory file format and content.
-        """
-        try:
-            path = self._validate_file_basics(file_path)
+        """Validate inventory file format and content."""
+        df = self.read_excel_file(file_path, is_inventory=True)
+        self._validate_dataframe(df, is_inventory=True)
+        return True
             
-            # Leer archivo de inventario con el método específico
-            df = self.read_inventory_file(path)
+    def _validate_audit_columns(self, df: pd.DataFrame) -> None:
+        """Validate required columns for audit files."""
+        critical_columns = {'FULL PART NUMBER', 'ORGANIZATION CODE', 'SERIAL NUMBER CONTROL'}
+        missing_critical = critical_columns - set(df.columns)
+        if missing_critical:
+            raise ValueError(f"Audit file missing critical columns: {missing_critical}")
+        # Opcional: Loguear columnas faltantes no críticas
+        all_missing = set(self.audit_required_columns.keys()) - set(df.columns)
+        if all_missing - missing_critical:
+            logger.warning(f"Columnas no críticas faltantes en archivo de auditoría: {all_missing - missing_critical}")
             
-            # Verificar columnas requeridas - Convertir todas las columnas a string primero
-            df_columns = set(str(col).upper() for col in df.columns)
-            required_columns = set(col.upper() for col in self.inventory_required_columns.keys())
-            
-            missing_columns = required_columns - df_columns
-            if missing_columns:
-                raise ValueError(f"Inventory file missing required columns: {missing_columns}")
-            
-            return True
-                
-        except Exception as e:
-            logger.error(f"Inventory file validation error: {str(e)}")
-            raise
+    def _validate_inventory_columns(self, df: pd.DataFrame) -> None:
+        """Valida las columnas requeridas para archivos de inventario."""
+        logger.info("=== VALIDACIÓN DE COLUMNAS DE INVENTARIO ===")
+        
+        # Mostrar columnas disponibles
+        logger.info("Columnas disponibles:")
+        for col in df.columns:
+            logger.info(f"  - {col}")
+        
+        # Normalizar columnas requeridas
+        required_columns = {self._normalize_column_name(col) for col in self.inventory_required_columns.keys()}
+        df_columns = {self._normalize_column_name(col) for col in df.columns}
+        
+        logger.info("\nColumnas requeridas:")
+        for col in sorted(required_columns):
+            logger.info(f"  - {col}")
+        
+        # Encontrar columnas faltantes
+        missing_columns = required_columns - df_columns
+        
+        logger.info("\nColumnas faltantes:")
+        for col in missing_columns:
+            logger.info(f"  - {col}")
+        
+        if missing_columns:
+            raise ValueError(f"Inventory file missing critical columns: {missing_columns}")
         
     def save_excel_file(self, df: pd.DataFrame, file_path: Path) -> None:
         """
@@ -600,18 +847,19 @@ class ExcelRepository:
         """Ensure cleanup on destruction."""
         self.cleanup()
         
-    def read_inventory_file(self, file_path: Path) -> pd.DataFrame:
-        """Read and normalize inventory file."""
+    def read_inventory_file(self, file_path: Path, sheet_name: Optional[str] = None) -> pd.DataFrame:
+        """
+        Lee y normaliza archivo de inventario explícitamente.
+        """
         try:
             logger.info(f"Reading inventory file: {file_path}")
             
-            if not self._is_inventory_file(file_path):
-                raise ValueError("Not a valid inventory file format")
-            
-            # Usar read_excel_file para mantener la consistencia
-            df = self.read_excel_file(file_path, is_inventory=True)
-            
-            return df
+            # Usar el método general con flag explícito de inventario
+            return self.read_excel_file(
+                file_path, 
+                is_inventory=True,  # CLAVE: Forzar modo inventario
+                sheet_name=sheet_name
+            )
                 
         except Exception as e:
             logger.error(f"Error reading inventory file: {str(e)}")
