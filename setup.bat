@@ -37,8 +37,8 @@ python -m pip install openpyxl xlsxwriter xlrd --no-cache-dir
 if errorlevel 1 goto reporting_error
 
 :: Install GUI dependencies
-echo Installing PyQt6 and related libraries...
-python -m pip install PyQt6 PyQt6-tools PyQt6-Qt6 --no-cache-dir
+echo Installing PyQt6 libraries...
+python -m pip install PyQt6 --no-cache-dir
 if errorlevel 1 goto gui_error
 
 echo Installing Pillow...
@@ -62,8 +62,12 @@ echo -----------------
 python -c "import pandas; import polars; import pyarrow; import dask; import numpy; import scipy; import sklearn" >nul 2>&1
 if errorlevel 1 echo ERROR: Data processing libraries not properly installed
 
-python -c "import PyQt6; import PIL" >nul 2>&1
-if errorlevel 1 echo ERROR: GUI libraries not properly installed
+:: Specific PyQt6 import verification
+python -c "from PyQt6 import QtWidgets, QtCore, QtGui" >nul 2>&1
+if errorlevel 1 echo ERROR: PyQt6 libraries not properly installed
+
+python -c "import PIL" >nul 2>&1
+if errorlevel 1 echo ERROR: Pillow not properly installed
 
 python -c "import openpyxl; import xlsxwriter" >nul 2>&1
 if errorlevel 1 echo ERROR: Excel libraries not properly installed
