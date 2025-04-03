@@ -88,7 +88,7 @@ class AuditProcessApp:
         
         finally:
             self.logger.info("Initialization process completed")
-
+ 
     def cleanup(self) -> None:
         """Clean up application resources"""
         try:
