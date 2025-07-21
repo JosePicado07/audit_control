@@ -165,20 +165,76 @@ class ExcelRepository:
             raise
 
     def _is_inventory_file(self, file_path: Path) -> bool:
-        """Check if file is an inventory format."""
+        """
+        Detección mejorada que distingue entre WMS en título vs datos.
+        """
+        logger.info(f"🔍 DEBUGGING _is_inventory_file: {file_path.name}")
+        
         try:
             wb = openpyxl.load_workbook(file_path, read_only=True)
             ws = wb.active
-            # Verificar primeras 5 filas por si el título está en otra posición
-            for row in list(ws.iter_rows(max_row=5)):
+            
+            # 1. BUSCAR TÍTULO ESPECÍFICO DE INVENTARIO
+            title_row_found = False
+            for row_idx, row in enumerate(list(ws.iter_rows(max_row=3)), 1):
                 for cell in row:
-                    if cell.value and 'WMS' in str(cell.value).upper():
+                    if cell.value:
+                        cell_str = str(cell.value).strip()
+                        # TÍTULO ESPECÍFICO de inventario
+                        if 'WMS ON HAND INVENTORY' in cell_str.upper():
+                            logger.info(f"✅ Found inventory title in row {row_idx}: '{cell_str}'")
+                            wb.close()
+                            return True
+                        # TÍTULO ESPECÍFICO de auditoría
+                        elif 'ITEM GAH' in cell_str.upper():
+                            logger.info(f"✅ Found audit title in row {row_idx}: '{cell_str}'")
+                            wb.close()
+                            return False
+            
+            # 2. FALLBACK: Si no encuentra títulos específicos, verificar patrón de datos
+            logger.info("⚠️ No specific title found, checking data patterns...")
+            
+            # Buscar patrones en headers (row 2-3 típicamente)
+            for row_idx in range(2, 4):
+                if row_idx <= ws.max_row:
+                    row_data = [str(cell.value).upper() if cell.value else '' 
+                            for cell in list(ws.iter_rows(min_row=row_idx, max_row=row_idx))[0]]
+                    
+                    # Indicadores fuertes de INVENTARIO
+                    inventory_indicators = [
+                        'AGING 0-30 QUANTITY', 'AGING 31-60 QUANTITY',
+                        'SUBINVENTORY CODE', 'MATERIAL DESIGNATOR'
+                    ]
+                    
+                    # Indicadores fuertes de AUDITORÍA
+                    audit_indicators = [
+                        'FULL PART NUMBER', 'SERIAL NUMBER CONTROL',
+                        'VERTEX PRODUCT CLASS'
+                    ]
+                    
+                    inventory_score = sum(1 for indicator in inventory_indicators 
+                                        if any(indicator in col for col in row_data))
+                    audit_score = sum(1 for indicator in audit_indicators 
+                                    if any(indicator in col for col in row_data))
+                    
+                    logger.info(f"📊 Row {row_idx} - Inventory score: {inventory_score}, Audit score: {audit_score}")
+                    
+                    if inventory_score >= 2:
+                        logger.info("🎯 Strong inventory indicators found")
                         wb.close()
                         return True
+                    elif audit_score >= 2:
+                        logger.info("🎯 Strong audit indicators found")
+                        wb.close()
+                        return False
+            
+            # 3. DEFAULT: Si no hay indicadores claros, asumir auditoría
+            logger.info("❓ Ambiguous file, defaulting to AUDIT")
             wb.close()
             return False
+            
         except Exception as e:
-            logger.error(f"Error checking if file is inventory: {str(e)}")
+            logger.error(f"❌ Error checking file type: {str(e)}")
             return False
         
         
@@ -223,7 +279,8 @@ class ExcelRepository:
             # Determinar modo de lectura
             if read_mode == 'auto':
                 file_size_mb = file_path.stat().st_size / (1024 * 1024)
-                read_mode = 'lazy' if file_size_mb > 10 or is_inventory else 'simple'
+                read_mode = 'lazy' if file_size_mb > 10 and not is_inventory else 'simple'
+
 
             # Leer con el modo seleccionado
             if read_mode == 'lazy':

@@ -1794,9 +1794,10 @@ class AuditProcessor:
             logger.info(f"Leyendo archivo de inventario: {file_path}")
             
             # Leer archivo
+            is_inventory_format = self.repository._is_inventory_file(Path(file_path))
             df = self.repository.read_excel_file(
                 Path(file_path),
-                is_inventory=True
+                is_inventory=is_inventory_format
             )
             
             # Diagnóstico: Mostrar columnas disponibles
